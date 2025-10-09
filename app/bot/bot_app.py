@@ -559,7 +559,8 @@ class BotApp:
                 "Итог:\n\n"
                 f"<b>Гипотеза</b>: <b>{hypo}</b>\n"
                 f"Причина: {reason}\n\n"
-                f"<b>Карточка</b>:\n{desc_html}{('\n' + subs_block) if subs_block else ''}"
+                f"<b>Карточка</b>:\n{desc_html}"
+                f"{f'\n{subs_block}' if subs_block else ''}"
             )
         else:
             text = f"Итог:\n\n<b>Гипотеза</b>: <b>{hypo}</b>\nПричина: {reason}"
