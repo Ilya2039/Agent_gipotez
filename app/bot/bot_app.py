@@ -20,10 +20,18 @@ from app.prompts.prompts import (
     build_select_hypothesis_alternative,
     build_select_subhypothesis_prompt,
 )
+from app.prompts.dynamic import (
+    build_decide_next_action_prompt,
+    build_generate_free_hypothesis_prompt,
+    build_generate_discovery_question_prompt,
+    build_generate_meeting_questions_prompt,
+)
 from app.data.hypotheses_repo import (
     get_full_card_formatted_html,
     get_card_by_hypothesis_title_html,
     get_card_description_only_html,
+    get_best_full_card_by_cosine,
+    format_card_fields_to_html,
 )
 from app.survey.model import SURVEY, SURVEY_PREFIX, SURVEY_NEXT, SurveySession, make_keyboard
 from dotenv import load_dotenv
@@ -37,6 +45,7 @@ from app.data.sub_repo import SubRepo
 
 class Flow(StatesGroup):
     waiting_followup_answer = State()
+    waiting_dynamic_answer = State()
 
 
 class BotApp:
@@ -61,15 +70,22 @@ class BotApp:
         self.subrepo = SubRepo()
         # store selected main hypothesis context per chat for sub-selection step
         self.selected_main: Dict[int, Dict[str, str]] = {}
+        # dynamic flow storages
+        self.dynamic_qa: Dict[int, List[Dict[str, str]]] = {}
+        self.dynamic_idx: Dict[int, int] = {}
+        self.waiting_file_first: Dict[int, bool] = {}
 
     async def start(self) -> None:
         self.dp.message.register(self.cmd_start, CommandStart())
+        self.dp.message.register(self.cmd_analyze, Command(commands=["analyze"]))
+        self.dp.message.register(self.cmd_skip, Command(commands=["skip"]))
         self.dp.message.register(self.cmd_survey, Command(commands=["survey"]))
         self.dp.message.register(self.on_document, F.document)
         self.dp.callback_query.register(self.on_survey_answer, F.data.startswith(f"{SURVEY_PREFIX}:"))
         self.dp.callback_query.register(self.on_survey_next, F.data == SURVEY_NEXT)
         self.dp.callback_query.register(self.on_sub_select, F.data.startswith("sub:"))
         self.dp.message.register(self.on_followup_answer, Flow.waiting_followup_answer)
+        self.dp.message.register(self.on_dynamic_answer, Flow.waiting_dynamic_answer)
         await self.dp.start_polling(self.bot)
 
     def _render_q_text(self, q: Dict[str, object]) -> str:
@@ -86,9 +102,193 @@ class BotApp:
         # init per-chat dialog log
         self._ensure_dialog_log(message.chat.id, None)
         self._log(message.chat.id, "== START ==")
+        chat_id = message.chat.id
+        self.waiting_file_first[chat_id] = True
         await message.answer(
-            "Я умею выявлять гипотезы, описывающие возможные боли и точки роста для клиента. Для того, чтобы это сделать, мне нужно задать Вам несколько уточняющих вопросов.\n\nВ начале предлагаю ответить на 6 вопросов с выбором ответа. Затем я задам 4 вопроса, предполагающих открытый ответ."
+            "Сначала пришлите материалы по клиенту (.docx или .json). После загрузки задам 5 уточняющих вопросов и сформулирую гипотезу.\nЕсли материалов нет, используйте /skip."
         )
+    async def cmd_analyze(self, message: Message, state: FSMContext) -> None:
+        chat_id = message.chat.id
+        # reset dynamic storages
+        self.dynamic_qa.pop(chat_id, None)
+        self.dynamic_idx.pop(chat_id, None)
+        self.waiting_file_first[chat_id] = True
+        await message.answer("Пришлите .docx/.json по клиенту. После загрузки начну 5 вопросов. Если файлов нет — /skip.")
+
+    async def cmd_skip(self, message: Message, state: FSMContext) -> None:
+        chat_id = message.chat.id
+        if not self.waiting_file_first.get(chat_id):
+            await message.answer("Уже идём по вопросам.")
+            return
+        self.waiting_file_first[chat_id] = False
+        await message.answer("Ок, начнём без файлов. Задам 5 вопросов.")
+        await self._start_discovery(message, state)
+
+    async def on_dynamic_answer(self, message: Message, state: FSMContext) -> None:
+        chat_id = message.chat.id
+        qa = self.dynamic_qa.get(chat_id) or []
+        if qa and not qa[-1].get("answer"):
+            qa[-1]["answer"] = message.text or ""
+        else:
+            qa.append({"question": "(free)", "answer": message.text or ""})
+        self.dynamic_qa[chat_id] = qa
+        self._log(chat_id, f"A: {message.text or ''}")
+        idx = (self.dynamic_idx.get(chat_id) or 1)
+        if idx < 5:
+            await self._ask_next_discovery(message, state)
+        else:
+            await self._finalize_dynamic_hypothesis(message, state)
+
+    async def _start_discovery(self, message: Message, state: FSMContext) -> None:
+        chat_id = message.chat.id
+        self.dynamic_qa[chat_id] = []
+        self.dynamic_idx[chat_id] = 0
+        await self._ask_next_discovery(message, state)
+
+    async def _ask_next_discovery(self, message: Message, state: FSMContext) -> None:
+        chat_id = message.chat.id
+        asked = [it.get("question", "") for it in (self.dynamic_qa.get(chat_id) or []) if it.get("question")]
+        qa = self.dynamic_qa.get(chat_id) or []
+        import json as _json
+        qa_json = _json.dumps(qa, ensure_ascii=False, indent=2)
+        dialog_blob = self._compute_context_blob(chat_id)
+        examples_text = Path("data/hypotheses.txt").read_text(encoding="utf-8") if Path("data/hypotheses.txt").exists() else ""
+        prompt = build_generate_discovery_question_prompt(
+            qa_json=qa_json,
+            dialog_json=dialog_blob,
+            examples_text=examples_text,
+            avoid=asked,
+            count=1,
+        )
+        raw = await self._invoke_llm(prompt, system=self._system_strict_json)
+        try:
+            arr = json.loads(raw)
+        except Exception:
+            arr = []
+        if not isinstance(arr, list) or not arr:
+            await message.answer("Не удалось сгенерировать вопрос. Попробуйте /analyze ещё раз.")
+            return
+        qtext = str(arr[0]).strip()
+        if not qtext.endswith("?"):
+            qtext = qtext.rstrip(". ") + "?"
+        (self.dynamic_qa.setdefault(chat_id, [])).append({"question": qtext, "answer": ""})
+        # example answer
+        try:
+            from app.prompts.prompts import build_example_answer_prompt
+            example_raw = await self._invoke_llm(build_example_answer_prompt(qtext, qa_json, dialog_blob))
+            example = (example_raw or "").strip().strip('`"')
+            import re as _re
+            m = _re.search(r"^(.+?[.!?])\s", example)
+            if m:
+                example = m.group(1)
+            words = [w for w in example.split() if w]
+            if len(words) > 12:
+                example = " ".join(words[:12])
+                if not example.endswith(('.', '!', '?')):
+                    example += '.'
+            tail = f"\n<i>Пример ответа:</i> {example}" if example else ""
+        except Exception:
+            tail = ""
+        idx = (self.dynamic_idx.get(chat_id) or 0) + 1
+        self.dynamic_idx[chat_id] = idx
+        await message.answer(f"Вопрос {idx}/5:\n{qtext}{tail}")
+        self._log(chat_id, f"Q: {qtext}")
+        await state.set_state(Flow.waiting_dynamic_answer)
+
+    async def _finalize_dynamic_hypothesis(self, message: Message, state: FSMContext) -> None:
+        chat_id = message.chat.id
+        qa = self.dynamic_qa.get(chat_id) or []
+        import json as _json
+        qa_json = _json.dumps(qa, ensure_ascii=False, indent=2)
+        dialog_blob = self._compute_context_blob(chat_id)
+        examples_text = Path("data/hypotheses.txt").read_text(encoding="utf-8") if Path("data/hypotheses.txt").exists() else ""
+        hyp_prompt = build_generate_free_hypothesis_prompt("", qa_json, dialog_blob, examples_text, prefer_non_finance=True)
+        hyp_raw = await self._invoke_llm(hyp_prompt, system=self._system_strict_json)
+        try:
+            hyp_obj = json.loads(hyp_raw)
+        except Exception:
+            hyp_obj = {"hypothesis": hyp_raw.strip(), "reason": ""}
+        hypo = (hyp_obj.get("hypothesis") or "").strip()
+        # Build 3-4 meeting questions
+        q_prompt = build_generate_meeting_questions_prompt(hypo, qa_json, dialog_blob, count=4)
+        q_raw = await self._invoke_llm(q_prompt, system=self._system_strict_json)
+        try:
+            q_arr = json.loads(q_raw)
+        except Exception:
+            q_arr = []
+        questions_block = "\n".join([f"• {str(q).strip()}" for q in q_arr[:4]]) if isinstance(q_arr, list) else ""
+        text = (
+            f"Итог:\n\n<b>Гипотеза</b>: <b>{hypo}</b>\n\n"
+            f"<b>Вопросы к встрече:</b>\n{questions_block if questions_block else '—'}"
+        )
+        await message.answer(text)
+        self._log(chat_id, f"FINAL (FREE) HYPOTHESIS: {hypo}")
+        await state.clear()
+
+    async def _decide_and_ask_next(self, message: Message, state: FSMContext) -> None:
+        chat_id = message.chat.id
+        theme = self.dynamic_theme.get(chat_id, "")
+        qa = self.dynamic_qa.get(chat_id) or []
+        import json as _json
+        qa_json = _json.dumps(qa, ensure_ascii=False, indent=2)
+        dialog_blob = self._compute_context_blob(chat_id)
+        prompt = build_decide_next_action_prompt(theme, qa_json, dialog_blob, prefer_non_finance=True)
+        raw = await self._invoke_llm(prompt, system=self._system_strict_json)
+        try:
+            obj = json.loads(raw)
+        except Exception:
+            obj = {}
+        action = (obj.get("action") or "ask").strip()
+        if action == "ask":
+            qtext = (obj.get("question") or "Уточните, пожалуйста, ключевой аспект по теме?").strip()
+            if not qtext.endswith("?"):
+                qtext = qtext.rstrip(". ") + "?"
+            (self.dynamic_qa.setdefault(chat_id, [])).append({"question": qtext, "answer": ""})
+            await message.answer(qtext)
+            self._log(chat_id, f"Q: {qtext}")
+            await state.set_state(Flow.waiting_dynamic_answer)
+            return
+        if action == "request_file":
+            await message.answer("Похоже, не хватает материалов. Пришлите .docx или .json по клиенту — учту в анализе.")
+            # keep state depending on whether last item has answer
+            await state.set_state(Flow.waiting_dynamic_answer)
+            return
+        if action == "hypothesis":
+            # generate free-form, industry-focused hypothesis
+            examples_text = Path("data/hypotheses.txt").read_text(encoding="utf-8") if Path("data/hypotheses.txt").exists() else ""
+            hyp_prompt = build_generate_free_hypothesis_prompt(theme, qa_json, dialog_blob, examples_text, prefer_non_finance=True)
+            hyp_raw = await self._invoke_llm(hyp_prompt, system=self._system_strict_json)
+            try:
+                hyp_obj = json.loads(hyp_raw)
+            except Exception:
+                hyp_obj = {"hypothesis": hyp_raw.strip(), "reason": ""}
+            hypo = (hyp_obj.get("hypothesis") or "").strip()
+            reason = (hyp_obj.get("reason") or "").strip()
+            tags = hyp_obj.get("tags") or []
+            # try find best matching card by cosine to add rich description if available
+            desc_html = ""
+            try:
+                best = get_best_full_card_by_cosine(hypo)
+                if best:
+                    desc_html = format_card_fields_to_html(best.get("title", ""), best.get("text", ""))
+            except Exception:
+                desc_html = ""
+            text = (
+                "Итог:\n\n"
+                f"<b>Гипотеза</b>: <b>{hypo}</b>\n"
+                f"Причина: {reason}\n"
+            )
+            if tags:
+                text += f"\nТеги: {', '.join(tags)}\n"
+            if desc_html:
+                text += f"\n<b>Карточка (по близости):</b>\n{desc_html}"
+            await message.answer(text)
+            self._log(chat_id, f"FINAL (FREE) HYPOTHESIS: {hypo}\nREASON: {reason}")
+            await state.clear()
+            return
+        # stop or unknown
+        await message.answer("Остановлюсь здесь. Можем продолжить в любой момент командой /analyze или пришлите материалы.")
+        await state.clear()
 
     async def cmd_survey(self, message: Message, state: FSMContext) -> None:
         chat_id = message.chat.id
@@ -145,8 +345,10 @@ class BotApp:
             self._log(message.chat.id, f"Parsed JSON saved: {dump_path}")
             # Не отправляем JSON в чат по требованию
             await message.answer("Файл обработан. Продолжаем.")
-            # optional: start survey automatically
-            await self.cmd_survey(message, state)
+            # If waiting for file to start discovery, begin now
+            if self.waiting_file_first.get(message.chat.id):
+                self.waiting_file_first[message.chat.id] = False
+                await self._start_discovery(message, state)
         except Exception as e:
             logging.exception("Failed to handle document: %s", e)
             await message.answer("Не удалось обработать файл. Убедитесь, что это корректный DOCX/JSON.")
