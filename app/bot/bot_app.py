@@ -25,6 +25,7 @@ from app.prompts.dynamic import (
     build_generate_free_hypothesis_prompt,
     build_generate_discovery_question_prompt,
     build_generate_meeting_questions_prompt,
+    build_generate_alternative_hypothesis_prompt,
 )
 from app.data.hypotheses_repo import (
     get_full_card_formatted_html,
@@ -74,6 +75,13 @@ class BotApp:
         self.dynamic_qa: Dict[int, List[Dict[str, str]]] = {}
         self.dynamic_idx: Dict[int, int] = {}
         self.waiting_file_first: Dict[int, bool] = {}
+        self.last_result: Dict[int, Dict[str, object]] = {}
+        # Avoid lists across alternative rounds
+        self.avoid_questions_all: Dict[int, List[str]] = {}
+        self.avoid_hypotheses: Dict[int, List[str]] = {}
+        # Track global avoids across alternative rounds
+        self.avoid_questions_all: Dict[int, List[str]] = {}
+        self.avoid_hypotheses: Dict[int, List[str]] = {}
 
     async def start(self) -> None:
         self.dp.message.register(self.cmd_start, CommandStart())
@@ -84,6 +92,7 @@ class BotApp:
         self.dp.callback_query.register(self.on_survey_answer, F.data.startswith(f"{SURVEY_PREFIX}:"))
         self.dp.callback_query.register(self.on_survey_next, F.data == SURVEY_NEXT)
         self.dp.callback_query.register(self.on_sub_select, F.data.startswith("sub:"))
+        self.dp.callback_query.register(self.on_alt_more, F.data == "alt:more")
         self.dp.message.register(self.on_followup_answer, Flow.waiting_followup_answer)
         self.dp.message.register(self.on_dynamic_answer, Flow.waiting_dynamic_answer)
         await self.dp.start_polling(self.bot)
@@ -148,6 +157,8 @@ class BotApp:
     async def _ask_next_discovery(self, message: Message, state: FSMContext) -> None:
         chat_id = message.chat.id
         asked = [it.get("question", "") for it in (self.dynamic_qa.get(chat_id) or []) if it.get("question")]
+        # also avoid cross-round previously asked
+        cross_avoid = self.avoid_questions_all.get(chat_id) or []
         qa = self.dynamic_qa.get(chat_id) or []
         import json as _json
         qa_json = _json.dumps(qa, ensure_ascii=False, indent=2)
@@ -157,7 +168,7 @@ class BotApp:
             qa_json=qa_json,
             dialog_json=dialog_blob,
             examples_text=examples_text,
-            avoid=asked,
+            avoid=asked + cross_avoid,
             count=1,
         )
         raw = await self._invoke_llm(prompt, system=self._system_strict_json)
@@ -172,6 +183,10 @@ class BotApp:
         if not qtext.endswith("?"):
             qtext = qtext.rstrip(". ") + "?"
         (self.dynamic_qa.setdefault(chat_id, [])).append({"question": qtext, "answer": ""})
+        # track for cross-round avoid
+        all_list = self.avoid_questions_all.setdefault(chat_id, [])
+        if qtext not in all_list:
+            all_list.append(qtext)
         # example answer
         try:
             from app.prompts.prompts import build_example_answer_prompt
@@ -221,9 +236,32 @@ class BotApp:
             f"Итог:\n\n<b>Гипотеза</b>: <b>{hypo}</b>\n\n"
             f"<b>Вопросы к встрече:</b>\n{questions_block if questions_block else '—'}"
         )
-        await message.answer(text)
+        # inline button to request alternative hypothesis
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="Получить ещё гипотезу", callback_data="alt:more")]]
+        )
+        await message.answer(text, reply_markup=kb)
         self._log(chat_id, f"FINAL (FREE) HYPOTHESIS: {hypo}")
+        # store last result for avoidance
+        self.last_result[chat_id] = {"hypothesis": hypo, "questions": q_arr[:4] if isinstance(q_arr, list) else []}
         await state.clear()
+
+    async def on_alt_more(self, cq: CallbackQuery, state: FSMContext) -> None:
+        chat_id = cq.message.chat.id
+        prev = self.last_result.get(chat_id) or {}
+        prev_hypo = str(prev.get("hypothesis") or "")
+        if prev_hypo:
+            self.avoid_hypotheses.setdefault(chat_id, []).append(prev_hypo)
+        # reset round and start new discovery
+        self.dynamic_qa[chat_id] = []
+        self.dynamic_idx[chat_id] = 0
+        try:
+            await cq.answer("Новый раунд: задаю другие вопросы")
+        except Exception:
+            pass
+        await cq.message.answer("Запускаю новый раунд. Будут другие вопросы, чтобы проверить альтернативную гипотезу.")
+        logging.info("[FLOW] Start alternative round for chat %s; avoid hypo: %s", chat_id, prev_hypo)
+        await self._ask_next_discovery(cq.message, state)
 
     async def _decide_and_ask_next(self, message: Message, state: FSMContext) -> None:
         chat_id = message.chat.id
