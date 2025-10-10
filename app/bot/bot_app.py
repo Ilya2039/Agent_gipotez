@@ -114,7 +114,7 @@ class BotApp:
         chat_id = message.chat.id
         self.waiting_file_first[chat_id] = True
         await message.answer(
-            "Сначала пришлите материалы по клиенту (.docx или .json). После загрузки задам 5 уточняющих вопросов и сформулирую гипотезу.\nЕсли материалов нет, используйте /skip."
+            "Сначала пришлите материалы по клиенту (.docx или .json). После загрузки задам до 5 уточняющих вопросов и сформулирую гипотезу.\nЕсли материалов нет, используйте /skip."
         )
     async def cmd_analyze(self, message: Message, state: FSMContext) -> None:
         chat_id = message.chat.id
@@ -122,7 +122,7 @@ class BotApp:
         self.dynamic_qa.pop(chat_id, None)
         self.dynamic_idx.pop(chat_id, None)
         self.waiting_file_first[chat_id] = True
-        await message.answer("Пришлите .docx/.json по клиенту. После загрузки начну 5 вопросов. Если файлов нет — /skip.")
+        await message.answer("Пришлите .docx/.json по клиенту. После загрузки начну до 5 вопросов. Если файлов нет — /skip.")
 
     async def cmd_skip(self, message: Message, state: FSMContext) -> None:
         chat_id = message.chat.id
@@ -130,7 +130,7 @@ class BotApp:
             await message.answer("Уже идём по вопросам.")
             return
         self.waiting_file_first[chat_id] = False
-        await message.answer("Ок, начнём без файлов. Задам 5 вопросов.")
+        await message.answer("Ок, начнём без файлов. Задам до 5 вопросов.")
         await self._start_discovery(message, state)
 
     async def on_dynamic_answer(self, message: Message, state: FSMContext) -> None:
@@ -143,6 +143,30 @@ class BotApp:
         self.dynamic_qa[chat_id] = qa
         self._log(chat_id, f"A: {message.text or ''}")
         idx = (self.dynamic_idx.get(chat_id) or 1)
+        # Early stop decision: ask/request_file/hypothesis/stop
+        try:
+            import json as _json
+            qa_json_dec = _json.dumps(self.dynamic_qa.get(chat_id) or [], ensure_ascii=False, indent=2)
+            decision_raw = await self._invoke_llm(
+                build_decide_next_action_prompt("", qa_json_dec, self._compute_context_blob(chat_id), prefer_non_finance=True),
+                system=self._system_strict_json,
+            )
+            decision = json.loads(decision_raw)
+        except Exception:
+            decision = {}
+        act = (decision.get("action") or "").strip().lower() if isinstance(decision, dict) else ""
+        if act == "request_file":
+            await message.answer("Для уточнения гипотезы нужны документы: пришлите .docx или .json по клиенту.")
+            logging.info("[FLOW] decision=request_file (chat %s)", chat_id)
+            # keep waiting for answer state
+            if idx < 5:
+                await self._ask_next_discovery(message, state)
+            return
+        if act == "hypothesis" or act == "stop":
+            logging.info("[FLOW] decision=%s -> finalize (chat %s)", act or "hypothesis", chat_id)
+            await self._finalize_dynamic_hypothesis(message, state)
+            return
+        # default: continue asking until 5
         if idx < 5:
             await self._ask_next_discovery(message, state)
         else:
@@ -206,7 +230,7 @@ class BotApp:
             tail = ""
         idx = (self.dynamic_idx.get(chat_id) or 0) + 1
         self.dynamic_idx[chat_id] = idx
-        await message.answer(f"Вопрос {idx}/5:\n{qtext}{tail}")
+        await message.answer(f"Вопрос {idx}/5 (до 5):\n{qtext}{tail}")
         self._log(chat_id, f"Q: {qtext}")
         await state.set_state(Flow.waiting_dynamic_answer)
 
