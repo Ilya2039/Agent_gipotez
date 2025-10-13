@@ -555,13 +555,15 @@ class BotApp:
             subs_block = "\n".join(parts)
 
         if desc_html or subs_block:
+            subs_part = f"\n{subs_block}" if subs_block else ""
             text = (
                 "Итог:\n\n"
                 f"<b>Гипотеза</b>: <b>{hypo}</b>\n"
                 f"Причина: {reason}\n\n"
-                f"<b>Карточка</b>:\n{desc_html}"
-                f"{f'\n{subs_block}' if subs_block else ''}"
+                f"<b>Карточка</b>:\n{desc_html}{subs_part}"
             )
+
+
         else:
             text = f"Итог:\n\n<b>Гипотеза</b>: <b>{hypo}</b>\nПричина: {reason}"
         await message.answer(text)
