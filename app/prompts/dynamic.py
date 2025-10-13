@@ -108,8 +108,12 @@ def build_generate_meeting_questions_prompt(
     qa_json: str,
     dialog_json: str = "",
     count: int = 4,
+    avoid_questions: list[str] | None = None,
 ) -> str:
     context_block = f"\nКонтекст (JSON из файла, укорочен):\n{dialog_json}\n" if dialog_json else ""
+    avoid_block = (
+        ("\nНе повторяй и не перефразируй эти вопросы:\n- " + "\n- ".join(avoid_questions)) if avoid_questions else ""
+    )
     return (
         "РОЛЬ: Партнёр на встрече с клиентом.\n"
         + "ЦЕЛЬ: подготовить 3–4 проверочных вопроса для валидации гипотезы и уточнения предпосылок.\n"
@@ -119,7 +123,47 @@ def build_generate_meeting_questions_prompt(
         + f"Гипотеза: {hypothesis}\n"
         + f"История Q/A (JSON):\n{qa_json}\n"
         + f"{context_block}"
+        + f"{avoid_block}"
         + "Формат ответа: [\"Вопрос?\", ...]"
+    )
+
+
+def build_generate_alternative_hypothesis_prompt(
+    qa_json: str,
+    dialog_json: str = "",
+    examples_text: str = "",
+    avoid_hypothesis: str = "",
+    prefer_non_finance: bool = True,
+) -> str:
+    context_block = f"\nКонтекст (JSON из файла, укорочен):\n{dialog_json}\n" if dialog_json else ""
+    examples_block = (
+        "\nПримеры типовых гипотез (для ориентира; можно формулировать свои):\n"
+        + examples_text
+        + "\n"
+        if examples_text
+        else ""
+    )
+    deprior = (
+        "\nФинансовые гипотезы — низкий приоритет. Не предлагай их без прямых фактов в их пользу.\n"
+        if prefer_non_finance
+        else ""
+    )
+    avoid_block = f"\nИсключить гипотезу: {avoid_hypothesis}\n" if avoid_hypothesis else ""
+    return (
+        "РОЛЬ: Ведущий отраслевой стратег.\n"
+        + "ЦЕЛЬ: предложить альтернативную прикладную гипотезу, отличную от указанной, с опорой на отраслевую специфику.\n"
+        + "ТРЕБОВАНИЯ: гипотеза конкретная, проверяемая, ведёт к действиям; избегать общих финансовых ярлыков.\n"
+        + deprior
+        + "СТРОГИЙ ВЫВОД — только JSON: {\n"
+        + '  "hypothesis": "<краткая формулировка>",\n'
+        + '  "reason": "<10-20 слов, на какие факты опираешься>",\n'
+        + '  "tags": ["отрасль", "подотрасль", "процессы"]\n'
+        + "}\n"
+        + f"История (Q/A JSON):\n{qa_json}\n"
+        + f"{context_block}"
+        + f"{examples_block}"
+        + f"{avoid_block}"
+        + "JSON:"
     )
 
 
