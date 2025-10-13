@@ -9,7 +9,7 @@ def build_decide_next_action_prompt(
 ) -> str:
     context_block = f"\nКонтекст (JSON из файла, укорочен):\n{dialog_json}\n" if dialog_json else ""
     deprior = (
-        "Финансовые гипотезы считаются наименее приоритетными и выбираются только если контекст и ответы явно их подтверждают.\n"
+        "Финансовые гипотезы считаются наименее приоритетными.\n"
         if prefer_non_finance
         else ""
     )

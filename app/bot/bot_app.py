@@ -218,7 +218,7 @@ class BotApp:
             q_arr = []
         questions_block = "\n".join([f"• {str(q).strip()}" for q in q_arr[:4]]) if isinstance(q_arr, list) else ""
         text = (
-            f"Итог:\n\n<b>Гипотеза</b>: <b>{hypo}</b>\n\n"
+            f"<b>Гипотеза</b>: <b>{hypo}</b>\n\n"
             f"<b>Вопросы к встрече:</b>\n{questions_block if questions_block else '—'}"
         )
         await message.answer(text)
