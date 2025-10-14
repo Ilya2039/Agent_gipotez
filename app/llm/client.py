@@ -20,7 +20,7 @@ class LLMConfig(BaseModel):
     verify_ssl_certs: bool = False
     scope: str = "GIGACHAT_API_CORP"
     model: str = "GigaChat-2-Reasoning"
-    temperature: float = 0.0
+    temperature: float = 0.8
     timeout: int = 60
     profanity_check: bool = False
 
@@ -33,7 +33,7 @@ class LLMClient:
             verify_ssl_certs=os.getenv("VERIFY_SSL_CERTS", "false").lower() == "true",
             scope=os.getenv("GIGACHAT_SCOPE", "GIGACHAT_API_CORP"),
             model=os.getenv("GIGACHAT_MODEL", "GigaChat-2-Reasoning"),
-            temperature=float(os.getenv("GIGACHAT_TEMPERATURE", "0.0")),
+            temperature=float(os.getenv("GIGACHAT_TEMPERATURE", "0.8")),
             timeout=int(os.getenv("GIGACHAT_TIMEOUT", "60")),
             profanity_check=os.getenv("GIGACHAT_PROFANITY_CHECK", "false").lower() == "true",
         )
