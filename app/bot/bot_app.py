@@ -47,6 +47,7 @@ from app.data.sub_repo import SubRepo
 class Flow(StatesGroup):
     waiting_followup_answer = State()
     waiting_dynamic_answer = State()
+    waiting_theme = State()
 
 
 class BotApp:
@@ -79,6 +80,7 @@ class BotApp:
         # Avoid lists across alternative rounds
         self.avoid_questions_all: Dict[int, List[str]] = {}
         self.avoid_hypotheses: Dict[int, List[str]] = {}
+        self.dynamic_theme: Dict[int, str] = {}
         # Track global avoids across alternative rounds
         self.avoid_questions_all: Dict[int, List[str]] = {}
         self.avoid_hypotheses: Dict[int, List[str]] = {}
@@ -93,8 +95,10 @@ class BotApp:
         self.dp.callback_query.register(self.on_survey_next, F.data == SURVEY_NEXT)
         self.dp.callback_query.register(self.on_sub_select, F.data.startswith("sub:"))
         self.dp.callback_query.register(self.on_alt_more, F.data == "alt:more")
+        self.dp.callback_query.register(self.on_theme_skip, F.data == "theme:skip")
         self.dp.message.register(self.on_followup_answer, Flow.waiting_followup_answer)
         self.dp.message.register(self.on_dynamic_answer, Flow.waiting_dynamic_answer)
+        self.dp.message.register(self.on_theme_answer, Flow.waiting_theme)
         await self.dp.start_polling(self.bot)
 
     def _render_q_text(self, q: Dict[str, object]) -> str:
@@ -114,7 +118,7 @@ class BotApp:
         chat_id = message.chat.id
         self.waiting_file_first[chat_id] = True
         await message.answer(
-            "Сначала пришлите материалы по клиенту (.docx или .json). После загрузки задам до 5 уточняющих вопросов и сформулирую гипотезу.\nЕсли материалов нет, используйте /skip."
+            "Сначала пришлите материалы по клиенту (.docx или .json) — это поможет точнее.\nЕсли файлов нет — сразу перейдём к вопросам (до 5)."
         )
     async def cmd_analyze(self, message: Message, state: FSMContext) -> None:
         chat_id = message.chat.id
@@ -130,8 +134,8 @@ class BotApp:
             await message.answer("Уже идём по вопросам.")
             return
         self.waiting_file_first[chat_id] = False
-        await message.answer("Ок, начнём без файлов. Задам до 5 вопросов.")
-        await self._start_discovery(message, state)
+        await message.answer("Ок, начнём без файлов. Сначала коротко уточню тему.")
+        await self._ask_theme(message, state)
 
     async def on_dynamic_answer(self, message: Message, state: FSMContext) -> None:
         chat_id = message.chat.id
@@ -148,7 +152,7 @@ class BotApp:
             import json as _json
             qa_json_dec = _json.dumps(self.dynamic_qa.get(chat_id) or [], ensure_ascii=False, indent=2)
             decision_raw = await self._invoke_llm(
-                build_decide_next_action_prompt("", qa_json_dec, self._compute_context_blob(chat_id), prefer_non_finance=True),
+                build_decide_next_action_prompt(self.dynamic_theme.get(chat_id, ""), qa_json_dec, self._compute_context_blob(chat_id), prefer_non_finance=True),
                 system=self._system_strict_json,
             )
             decision = json.loads(decision_raw)
@@ -156,11 +160,12 @@ class BotApp:
             decision = {}
         act = (decision.get("action") or "").strip().lower() if isinstance(decision, dict) else ""
         if act == "request_file":
-            await message.answer("Для уточнения гипотезы нужны документы: пришлите .docx или .json по клиенту.")
-            logging.info("[FLOW] decision=request_file (chat %s)", chat_id)
-            # keep waiting for answer state
+            # Не навязываем докуметы в динамическом раунде — продолжаем вопросы до 5
+            logging.info("[FLOW] decision=request_file -> continue asking (chat %s)", chat_id)
             if idx < 5:
                 await self._ask_next_discovery(message, state)
+            else:
+                await self._finalize_dynamic_hypothesis(message, state)
             return
         if act == "hypothesis" or act == "stop":
             logging.info("[FLOW] decision=%s -> finalize (chat %s)", act or "hypothesis", chat_id)
@@ -225,7 +230,7 @@ class BotApp:
                 example = " ".join(words[:12])
                 if not example.endswith(('.', '!', '?')):
                     example += '.'
-            tail = f"\n<i>Пример ответа:</i> {example}" if example else ""
+            tail = f"\n\n<i>Пример ответа:</i> {example}" if example else ""
         except Exception:
             tail = ""
         idx = (self.dynamic_idx.get(chat_id) or 0) + 1
@@ -241,7 +246,7 @@ class BotApp:
         qa_json = _json.dumps(qa, ensure_ascii=False, indent=2)
         dialog_blob = self._compute_context_blob(chat_id)
         examples_text = Path("data/hypotheses.txt").read_text(encoding="utf-8") if Path("data/hypotheses.txt").exists() else ""
-        hyp_prompt = build_generate_free_hypothesis_prompt("", qa_json, dialog_blob, examples_text, prefer_non_finance=True)
+        hyp_prompt = build_generate_free_hypothesis_prompt(self.dynamic_theme.get(chat_id, ""), qa_json, dialog_blob, examples_text, prefer_non_finance=True)
         hyp_raw = await self._invoke_llm(hyp_prompt, system=self._system_strict_json)
         try:
             hyp_obj = json.loads(hyp_raw)
@@ -257,7 +262,7 @@ class BotApp:
             q_arr = []
         questions_block = "\n".join([f"• {str(q).strip()}" for q in q_arr[:4]]) if isinstance(q_arr, list) else ""
         text = (
-            f"<b>Гипотеза</b>: <b>{hypo}</b>\n\n"
+            f"Итог:\n\n<b>Гипотеза</b>: <b>{hypo}</b>\n\n"
             f"<b>Вопросы к встрече:</b>\n{questions_block if questions_block else '—'}"
         )
         # inline button to request alternative hypothesis
@@ -270,22 +275,51 @@ class BotApp:
         self.last_result[chat_id] = {"hypothesis": hypo, "questions": q_arr[:4] if isinstance(q_arr, list) else []}
         await state.clear()
 
+    async def _ask_theme(self, message: Message, state: FSMContext) -> None:
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="Пропустить", callback_data="theme:skip")]]
+        )
+        await message.answer("Какая тема вам интересна для анализа состояния клиента?", reply_markup=kb)
+        await state.set_state(Flow.waiting_theme)
+
+    async def on_theme_answer(self, message: Message, state: FSMContext) -> None:
+        chat_id = message.chat.id
+        theme = (message.text or "").strip()
+        if not theme:
+            await message.answer("Пожалуйста, укажите тему в одном-двух словах.")
+            return
+        self.dynamic_theme[chat_id] = theme
+        await message.answer("Начинаю анализ клиента. Мне нужно задать вам несколько вопросов, чтобы узнать больше")
+        await state.clear()
+        await self._start_discovery(message, state)
+
+    async def on_theme_skip(self, cq: CallbackQuery, state: FSMContext) -> None:
+        chat_id = cq.message.chat.id
+        self.dynamic_theme[chat_id] = ""
+        try:
+            await cq.answer("Тему пропустили")
+        except Exception:
+            pass
+        await cq.message.answer("Начинаю анализ клиента. Мне нужно задать вам несколько вопросов, чтобы узнать больше")
+        await state.clear()
+        await self._start_discovery(cq.message, state)
+
     async def on_alt_more(self, cq: CallbackQuery, state: FSMContext) -> None:
         chat_id = cq.message.chat.id
         prev = self.last_result.get(chat_id) or {}
         prev_hypo = str(prev.get("hypothesis") or "")
         if prev_hypo:
             self.avoid_hypotheses.setdefault(chat_id, []).append(prev_hypo)
-        # reset round and start new discovery
+        # reset round and ask theme once per new hypothesis
         self.dynamic_qa[chat_id] = []
         self.dynamic_idx[chat_id] = 0
         try:
-            await cq.answer("Новый раунд: задаю другие вопросы")
+            await cq.answer("Новый раунд")
         except Exception:
             pass
-        await cq.message.answer("Запускаю новый раунд. Будут другие вопросы, чтобы проверить альтернативную гипотезу.")
+        # без дополнительного текста — сразу спрашиваем тему (с кнопкой пропуска)
         logging.info("[FLOW] Start alternative round for chat %s; avoid hypo: %s", chat_id, prev_hypo)
-        await self._ask_next_discovery(cq.message, state)
+        await self._ask_theme(cq.message, state)
 
     async def _decide_and_ask_next(self, message: Message, state: FSMContext) -> None:
         chat_id = message.chat.id
@@ -410,7 +444,7 @@ class BotApp:
             # If waiting for file to start discovery, begin now
             if self.waiting_file_first.get(message.chat.id):
                 self.waiting_file_first[message.chat.id] = False
-                await self._start_discovery(message, state)
+                await self._ask_theme(message, state)
         except Exception as e:
             logging.exception("Failed to handle document: %s", e)
             await message.answer("Не удалось обработать файл. Убедитесь, что это корректный DOCX/JSON.")
@@ -617,15 +651,12 @@ class BotApp:
             subs_block = "\n".join(parts)
 
         if desc_html or subs_block:
-            subs_part = f"\n{subs_block}" if subs_block else ""
             text = (
                 "Итог:\n\n"
                 f"<b>Гипотеза</b>: <b>{hypo}</b>\n"
                 f"Причина: {reason}\n\n"
-                f"<b>Карточка</b>:\n{desc_html}{subs_part}"
+                f"<b>Карточка</b>:\n{desc_html}{('\n' + subs_block) if subs_block else ''}"
             )
-
-
         else:
             text = f"Итог:\n\n<b>Гипотеза</b>: <b>{hypo}</b>\nПричина: {reason}"
         await message.answer(text)
@@ -775,7 +806,7 @@ class BotApp:
                 example = " ".join(words[:12])
                 if not example.endswith(('.', '!', '?')):
                     example += '.'
-            tail = f"\n<i>Пример ответа:</i> {example}" if example else ""
+            tail = f"\n\n<i>Пример ответа:</i> {example}" if example else ""
         except Exception:
             tail = ""
         await message_or_cq_message.answer(f"Уточняющий вопрос {idx}/4:\n{qtext}{tail}")
