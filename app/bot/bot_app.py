@@ -199,16 +199,24 @@ class BotApp:
             examples_text=examples_text,
             avoid=asked + cross_avoid,
             count=1,
+            theme=self.dynamic_theme.get(chat_id, ""),
         )
-        raw = await self._invoke_llm(prompt, system=self._system_strict_json)
+        try:
+            raw = await self._invoke_llm(prompt, system=self._system_strict_json)
+        except Exception as e:
+            logging.exception("[FLOW] LLM error generating discovery question: %s", e)
+            raw = ""
         try:
             arr = json.loads(raw)
         except Exception:
             arr = []
         if not isinstance(arr, list) or not arr:
-            await message.answer("Не удалось сгенерировать вопрос. Попробуйте /analyze ещё раз.")
-            return
-        qtext = str(arr[0]).strip()
+            # Fallback: задать базовый вопрос по теме или общим образом
+            theme_txt = (self.dynamic_theme.get(chat_id, "") or "деятельности компании").strip()
+            qtext = f"Какие ключевые задачи по теме {theme_txt} сейчас наиболее актуальны?"
+            logging.info("[FLOW] Fallback discovery question for chat %s: %s", chat_id, qtext)
+        else:
+            qtext = str(arr[0]).strip()
         if not qtext.endswith("?"):
             qtext = qtext.rstrip(". ") + "?"
         (self.dynamic_qa.setdefault(chat_id, [])).append({"question": qtext, "answer": ""})
@@ -651,12 +659,11 @@ class BotApp:
             subs_block = "\n".join(parts)
 
         if desc_html or subs_block:
-            subs_part = f"\n{subs_block}" if subs_block else ""
             text = (
                 "Итог:\n\n"
                 f"<b>Гипотеза</b>: <b>{hypo}</b>\n"
                 f"Причина: {reason}\n\n"
-                f"<b>Карточка</b>:\n{desc_html}{subs_part}"
+                f"<b>Карточка</b>:\n{desc_html}{('\n' + subs_block) if subs_block else ''}"
             )
         else:
             text = f"Итог:\n\n<b>Гипотеза</b>: <b>{hypo}</b>\nПричина: {reason}"

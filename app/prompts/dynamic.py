@@ -39,8 +39,10 @@ def build_generate_discovery_question_prompt(
     examples_text: str = "",
     avoid: list[str] | None = None,
     count: int = 1,
+    theme: str = "",
 ) -> str:
     context_block = f"\nКонтекст (JSON из файла, укорочен):\n{dialog_json}\n" if dialog_json else ""
+    theme_block = f"\nТема анализа (если указана, фокусируйся на ней): {theme}\n" if theme else ""
     examples_block = (
         "\nПримеры типовых гипотез (для ориентира; НЕ выбирай их, формулируй свои вопросы):\n"
         + examples_text
@@ -60,6 +62,7 @@ def build_generate_discovery_question_prompt(
         + f"N={count}.\n"
         + f"История Q/A (JSON):\n{qa_json}\n"
         + f"{context_block}"
+        + f"{theme_block}"
         + f"{examples_block}"
         + f"{avoid_block}"
         + "Формат ответа: [\"Вопрос?\"]"
