@@ -294,13 +294,13 @@ class BotApp:
         if unknown_qs:
             appendix = "\n\n<b>Будет полезно узнать у клиента:</b>\n" + "\n".join([f"• {q}" for q in unknown_qs if q])
         text = (
-            f"Итог:\n\n<b>Гипотеза</b>: <b>{hypo}</b>\n\n"
+            f"<b>Гипотеза</b>: <b>{hypo}</b>\n\n"
             f"<b>Вопросы к встрече:</b>\n{questions_block if questions_block else '—'}"
             f"{appendix}"
         )
         # inline button to request alternative hypothesis
         kb = InlineKeyboardMarkup(
-            inline_keyboard=[[InlineKeyboardButton(text="Получить ещё гипотезу", callback_data="alt:more")]]
+            inline_keyboard=[[InlineKeyboardButton(text="Сгенерировать ещё", callback_data="alt:more")]]
         )
         await message.answer(text, reply_markup=kb)
         self._log(chat_id, f"FINAL (FREE) HYPOTHESIS: {hypo}")
@@ -312,7 +312,7 @@ class BotApp:
         kb = InlineKeyboardMarkup(
             inline_keyboard=[[InlineKeyboardButton(text="Пропустить", callback_data="theme:skip")]]
         )
-        await message.answer("Какая тема вам интересна для анализа состояния клиента?", reply_markup=kb)
+        await message.answer("Какая тема вам интересна для анализа состояния клиента?\n\n<i>Примеры:</i> \n• Состояние относительно конкурентов\n• Организационные ситуации\n• Операцонные ситуации\n• Финансовое положение", reply_markup=kb)
         await state.set_state(Flow.waiting_theme)
 
     async def on_theme_answer(self, message: Message, state: FSMContext) -> None:
@@ -403,7 +403,6 @@ class BotApp:
             except Exception:
                 desc_html = ""
             text = (
-                "Итог:\n\n"
                 f"<b>Гипотеза</b>: <b>{hypo}</b>\n"
                 f"Причина: {reason}\n"
             )
@@ -656,7 +655,6 @@ class BotApp:
                 chosen = subs[0]
             qs_lines = "\n".join([f"• {q}" for q in chosen.get("questions", [])])
             text = (
-                "Итог:\n\n"
                 f"<b>Гипотеза</b>: <b>{hypo}</b>\n\n"
                 f"<b>Побочная</b>: <b>{chosen['title']}</b>\n"
                 f"<b>Вопросы:</b>\n{qs_lines}"
@@ -684,14 +682,14 @@ class BotApp:
             subs_block = "\n".join(parts)
 
         if desc_html or subs_block:
+            subs_part = f"\n{subs_block}" if subs_block else ""
             text = (
-                "Итог:\n\n"
                 f"<b>Гипотеза</b>: <b>{hypo}</b>\n"
                 f"Причина: {reason}\n\n"
-                f"<b>Карточка</b>:\n{desc_html}{('\n' + subs_block) if subs_block else ''}"
+                f"<b>Карточка</b>:\n{desc_html}{subs_part}"
             )
         else:
-            text = f"Итог:\n\n<b>Гипотеза</b>: <b>{hypo}</b>\nПричина: {reason}"
+            text = f"<b>Гипотеза</b>: <b>{hypo}</b>\nПричина: {reason}"
         await message.answer(text)
         self._log(chat_id, f"FINAL HYPOTHESIS: {hypo}\nREASON: {reason}")
         await state.clear()
@@ -715,7 +713,6 @@ class BotApp:
         # Render questions
         questions = "\n".join([f"• {q}" for q in sub.get("questions", [])])
         text = (
-            "Итог:\n\n"
             f"<b>Гипотеза</b>: <b>{main}</b>\n"
             f"Причина: {reason}\n\n"
             f"<b>Побочная гипотеза</b>: <b>{sub['title']}</b>\n"
