@@ -145,6 +145,18 @@ class BotApp:
         else:
             qa.append({"question": "(free)", "answer": message.text or ""})
         self.dynamic_qa[chat_id] = qa
+        # Track unknowns: if user says "не знаю" (or похожие), запомним вопрос
+        try:
+            ans_low = (message.text or "").strip().lower()
+            unknown = ans_low in {"не знаю", "незнаю", "хз", "не уверен", "нет данных"}
+            if unknown and qa:
+                unknown_list = self.meta.get(chat_id, {}).get("unknown_qs", [])
+                unknown_list = list(unknown_list) + [qa[-1].get("question") or ""]
+                rec = self.meta.get(chat_id, {})
+                rec["unknown_qs"] = unknown_list
+                self.meta[chat_id] = rec
+        except Exception:
+            pass
         self._log(chat_id, f"A: {message.text or ''}")
         idx = (self.dynamic_idx.get(chat_id) or 1)
         # Early stop decision: ask/request_file/hypothesis/stop
@@ -193,6 +205,12 @@ class BotApp:
         qa_json = _json.dumps(qa, ensure_ascii=False, indent=2)
         dialog_blob = self._compute_context_blob(chat_id)
         examples_text = Path("data/hypotheses.txt").read_text(encoding="utf-8") if Path("data/hypotheses.txt").exists() else ""
+        # build list of unknown topics to steer away
+        unknown_qs = []
+        try:
+            unknown_qs = list(self.meta.get(chat_id, {}).get("unknown_qs", []))
+        except Exception:
+            unknown_qs = []
         prompt = build_generate_discovery_question_prompt(
             qa_json=qa_json,
             dialog_json=dialog_blob,
@@ -200,6 +218,7 @@ class BotApp:
             avoid=asked + cross_avoid,
             count=1,
             theme=self.dynamic_theme.get(chat_id, ""),
+            avoid_unknown=unknown_qs,
         )
         try:
             raw = await self._invoke_llm(prompt, system=self._system_strict_json)
@@ -269,9 +288,15 @@ class BotApp:
         except Exception:
             q_arr = []
         questions_block = "\n".join([f"• {str(q).strip()}" for q in q_arr[:4]]) if isinstance(q_arr, list) else ""
+        # Build appendix with unknowns
+        unknown_qs = list(self.meta.get(chat_id, {}).get("unknown_qs", [])) if self.meta.get(chat_id) else []
+        appendix = ""
+        if unknown_qs:
+            appendix = "\n\n<b>Будет полезно узнать у клиента:</b>\n" + "\n".join([f"• {q}" for q in unknown_qs if q])
         text = (
             f"Итог:\n\n<b>Гипотеза</b>: <b>{hypo}</b>\n\n"
             f"<b>Вопросы к встрече:</b>\n{questions_block if questions_block else '—'}"
+            f"{appendix}"
         )
         # inline button to request alternative hypothesis
         kb = InlineKeyboardMarkup(

@@ -40,6 +40,7 @@ def build_generate_discovery_question_prompt(
     avoid: list[str] | None = None,
     count: int = 1,
     theme: str = "",
+    avoid_unknown: list[str] | None = None,
 ) -> str:
     context_block = f"\nКонтекст (JSON из файла, укорочен):\n{dialog_json}\n" if dialog_json else ""
     theme_block = f"\nТема анализа (если указана, фокусируйся на ней): {theme}\n" if theme else ""
@@ -53,6 +54,11 @@ def build_generate_discovery_question_prompt(
     avoid_block = (
         ("\nНе повторяй и не перефразируй эти вопросы:\n- " + "\n- ".join(avoid)) if avoid else ""
     )
+    unknown_block = (
+        ("\nСмени тему и не уточняй эти аспекты — КМ ответил, что не знает:\n- " + "\n- ".join(avoid_unknown))
+        if avoid_unknown
+        else ""
+    )
     return (
         "РОЛЬ: Старший интервьюер/консалтер.\n"
         + "ЦЕЛЬ: уточнить деятельность компании: отраслевая специфика, продукты, конкуренты, клиенты, процессы, задачи, сложности и боли.\n"
@@ -65,6 +71,7 @@ def build_generate_discovery_question_prompt(
         + f"{theme_block}"
         + f"{examples_block}"
         + f"{avoid_block}"
+        + f"{unknown_block}"
         + "Формат ответа: [\"Вопрос?\"]"
     )
 
