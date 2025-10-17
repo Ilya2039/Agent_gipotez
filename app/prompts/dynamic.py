@@ -1,5 +1,16 @@
 from __future__ import annotations
 
+"""
+Prompt builders for the dynamic flow.
+- Discovery questions (theme-aware, avoids repeats and "unknown" topics)
+- Creative main hypothesis
+- Creative alternative hypothesis (excludes previous one)
+- Meeting questions for hypothesis validation
+
+All builders return plain strings; strict JSON is enforced by the prompt text
+and by the common system message in the bot.
+"""
+
 
 def build_decide_next_action_prompt(
     theme: str,
@@ -73,6 +84,22 @@ def build_generate_discovery_question_prompt(
         + f"{avoid_block}"
         + f"{unknown_block}"
         + "Формат ответа: [\"Вопрос?\"]"
+    )
+
+
+def build_is_unknown_answer_prompt(answer: str) -> str:
+    """Classify if a user's reply semantically means 'don't know'.
+    The model must return strict JSON: {"unknown": true|false}.
+    Consider synonyms/colloquialisms (e.g., 'не знаю', 'я не в курсе', 'хз',
+    'затрудняюсь ответить', 'сложно сказать', 'нет данных', etc.).
+    Ignore polite preambles and punctuation; focus on meaning.
+    """
+    return (
+        "Классифицируй ответ пользователя на предмет отсутствия знания/информации.\n"
+        "Верни только JSON без текста: {\"unknown\": true|false}.\n"
+        "Считай unknown=true, если по смыслу ответ равен: не знаю/нет данных/не уверен/затрудняюсь ответить/без понятия/сложно сказать/хз/не помню и т.п.\n"
+        f"Ответ пользователя: {answer}\n"
+        "JSON:"
     )
 
 def build_generate_free_hypothesis_prompt(

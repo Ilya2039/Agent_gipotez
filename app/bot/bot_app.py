@@ -26,6 +26,7 @@ from app.prompts.dynamic import (
     build_generate_discovery_question_prompt,
     build_generate_meeting_questions_prompt,
     build_generate_alternative_hypothesis_prompt,
+    build_is_unknown_answer_prompt,
 )
 from app.data.hypotheses_repo import (
     get_full_card_formatted_html,
@@ -147,8 +148,11 @@ class BotApp:
         self.dynamic_qa[chat_id] = qa
         # Track unknowns: if user says "не знаю" (or похожие), запомним вопрос
         try:
-            ans_low = (message.text or "").strip().lower()
-            unknown = ans_low in {"не знаю", "незнаю", "хз", "не уверен", "нет данных"}
+            # LLM-based classification for broader coverage of 'unknown' semantics
+            cls_raw = await self._invoke_llm(build_is_unknown_answer_prompt(message.text or ""), system=self._system_strict_json)
+            import json as _json
+            cls = _json.loads(cls_raw)
+            unknown = bool(cls.get("unknown", False))
             if unknown and qa:
                 unknown_list = self.meta.get(chat_id, {}).get("unknown_qs", [])
                 unknown_list = list(unknown_list) + [qa[-1].get("question") or ""]
@@ -193,6 +197,10 @@ class BotApp:
         chat_id = message.chat.id
         self.dynamic_qa[chat_id] = []
         self.dynamic_idx[chat_id] = 0
+        # reset per-round unknown list so it stays within a single hypothesis
+        rec = self.meta.get(chat_id, {})
+        rec["unknown_qs"] = []
+        self.meta[chat_id] = rec
         await self._ask_next_discovery(message, state)
 
     async def _ask_next_discovery(self, message: Message, state: FSMContext) -> None:
@@ -265,6 +273,8 @@ class BotApp:
         await message.answer(f"Вопрос {idx}/5 (до 5):\n{qtext}{tail}")
         self._log(chat_id, f"Q: {qtext}")
         await state.set_state(Flow.waiting_dynamic_answer)
+
+    # kept placeholder for fallback heuristics if needed in future
 
     async def _finalize_dynamic_hypothesis(self, message: Message, state: FSMContext) -> None:
         chat_id = message.chat.id
