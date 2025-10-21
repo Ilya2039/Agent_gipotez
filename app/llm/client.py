@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+"""
+LLM client (GigaChat) via LangChain.
+- Loads configuration from environment (.env supported)
+- Exposes invoke(prompt, system) for synchronous usage in the bot flow
+"""
+
 import os
 from typing import Optional
 from pydantic import BaseModel
@@ -20,7 +26,7 @@ class LLMConfig(BaseModel):
     verify_ssl_certs: bool = False
     scope: str = "GIGACHAT_API_CORP"
     model: str = "GigaChat-2-Reasoning"
-    temperature: float = 0.8
+    temperature: float = 0.9
     timeout: int = 60
     profanity_check: bool = False
 

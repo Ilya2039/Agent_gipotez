@@ -13,21 +13,16 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import Message, CallbackQuery, FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton
 
 from app.llm.client import LLMClient
-from app.prompts.prompts import (
-    build_generate_followups_prompt,
-    build_select_hypothesis_prompt,
-    build_validate_hypothesis_prompt,
-    build_select_hypothesis_alternative,
-    build_select_subhypothesis_prompt,
-)
-from app.prompts.dynamic import (
+# legacy survey prompts removed
+from app.prompts.core import (
     build_decide_next_action_prompt,
     build_generate_free_hypothesis_prompt,
     build_generate_discovery_question_prompt,
     build_generate_meeting_questions_prompt,
     build_generate_alternative_hypothesis_prompt,
-    build_is_unknown_answer_prompt,
 )
+from app.bot.services.unknowns import classify_unknown
+from app.bot.services.examples import generate_short_example
 from app.data.hypotheses_repo import (
     get_full_card_formatted_html,
     get_card_by_hypothesis_title_html,
@@ -35,7 +30,7 @@ from app.data.hypotheses_repo import (
     get_best_full_card_by_cosine,
     format_card_fields_to_html,
 )
-from app.survey.model import SURVEY, SURVEY_PREFIX, SURVEY_NEXT, SurveySession, make_keyboard
+# survey legacy removed
 from dotenv import load_dotenv
 import logging
 import os
@@ -57,7 +52,7 @@ class BotApp:
         self.bot = Bot(token=token, default=DefaultBotProperties(parse_mode="HTML"))
         self.dp = Dispatcher()
         self.llm = LLMClient()
-        self.surveys: Dict[int, SurveySession] = {}
+        self.surveys: Dict[int, dict] = {}
         self.followup_questions: Dict[int, List[str]] = {}
         self.followup_answers: Dict[int, List[str]] = {}
         self.followup_idx: Dict[int, int] = {}
@@ -85,16 +80,14 @@ class BotApp:
         # Track global avoids across alternative rounds
         self.avoid_questions_all: Dict[int, List[str]] = {}
         self.avoid_hypotheses: Dict[int, List[str]] = {}
+        # debounce for file uploads (auto-start after last file)
+        self.file_debounce_tasks: Dict[int, asyncio.Task] = {}
 
     async def start(self) -> None:
         self.dp.message.register(self.cmd_start, CommandStart())
         self.dp.message.register(self.cmd_analyze, Command(commands=["analyze"]))
         self.dp.message.register(self.cmd_skip, Command(commands=["skip"]))
-        self.dp.message.register(self.cmd_survey, Command(commands=["survey"]))
         self.dp.message.register(self.on_document, F.document)
-        self.dp.callback_query.register(self.on_survey_answer, F.data.startswith(f"{SURVEY_PREFIX}:"))
-        self.dp.callback_query.register(self.on_survey_next, F.data == SURVEY_NEXT)
-        self.dp.callback_query.register(self.on_sub_select, F.data.startswith("sub:"))
         self.dp.callback_query.register(self.on_alt_more, F.data == "alt:more")
         self.dp.callback_query.register(self.on_theme_skip, F.data == "theme:skip")
         self.dp.message.register(self.on_followup_answer, Flow.waiting_followup_answer)
@@ -119,7 +112,8 @@ class BotApp:
         chat_id = message.chat.id
         self.waiting_file_first[chat_id] = True
         await message.answer(
-            "Сначала пришлите материалы по клиенту (.docx или .json) — это поможет точнее.\nЕсли файлов нет — сразу перейдём к вопросам (до 5)."
+            "Сначала пришлите ВСЕ доступные материалы по клиенту (.docx или .json).\n"
+            "Я автоматически начну вопросы через пару секунд после последнего файла. Если файлов нет — напишите /skip."
         )
     async def cmd_analyze(self, message: Message, state: FSMContext) -> None:
         chat_id = message.chat.id
@@ -149,10 +143,7 @@ class BotApp:
         # Track unknowns: if user says "не знаю" (or похожие), запомним вопрос
         try:
             # LLM-based classification for broader coverage of 'unknown' semantics
-            cls_raw = await self._invoke_llm(build_is_unknown_answer_prompt(message.text or ""), system=self._system_strict_json)
-            import json as _json
-            cls = _json.loads(cls_raw)
-            unknown = bool(cls.get("unknown", False))
+            unknown = await classify_unknown(self._invoke_llm, message.text or "", self._system_strict_json)
             if unknown and qa:
                 unknown_list = self.meta.get(chat_id, {}).get("unknown_qs", [])
                 unknown_list = list(unknown_list) + [qa[-1].get("question") or ""]
@@ -253,18 +244,7 @@ class BotApp:
             all_list.append(qtext)
         # example answer
         try:
-            from app.prompts.prompts import build_example_answer_prompt
-            example_raw = await self._invoke_llm(build_example_answer_prompt(qtext, qa_json, dialog_blob))
-            example = (example_raw or "").strip().strip('`"')
-            import re as _re
-            m = _re.search(r"^(.+?[.!?])\s", example)
-            if m:
-                example = m.group(1)
-            words = [w for w in example.split() if w]
-            if len(words) > 12:
-                example = " ".join(words[:12])
-                if not example.endswith(('.', '!', '?')):
-                    example += '.'
+            example = await generate_short_example(self._invoke_llm, qtext, qa_json, dialog_blob)
             tail = f"\n\n<i>Пример ответа:</i> {example}" if example else ""
         except Exception:
             tail = ""
@@ -283,39 +263,72 @@ class BotApp:
         qa_json = _json.dumps(qa, ensure_ascii=False, indent=2)
         dialog_blob = self._compute_context_blob(chat_id)
         examples_text = Path("data/hypotheses.txt").read_text(encoding="utf-8") if Path("data/hypotheses.txt").exists() else ""
-        hyp_prompt = build_generate_free_hypothesis_prompt(self.dynamic_theme.get(chat_id, ""), qa_json, dialog_blob, examples_text, prefer_non_finance=True)
-        hyp_raw = await self._invoke_llm(hyp_prompt, system=self._system_strict_json)
+        # Build 3 creative hypotheses (1 main + 2 alternatives) and 5 meeting questions for each
+        hypos: list[dict] = []
+        # main
+        main_prompt = build_generate_free_hypothesis_prompt(
+            self.dynamic_theme.get(chat_id, ""), qa_json, dialog_blob, examples_text, prefer_non_finance=True
+        )
+        main_raw = await self._invoke_llm(main_prompt, system=self._system_strict_json)
         try:
-            hyp_obj = json.loads(hyp_raw)
+            main_obj = json.loads(main_raw)
         except Exception:
-            hyp_obj = {"hypothesis": hyp_raw.strip(), "reason": ""}
-        hypo = (hyp_obj.get("hypothesis") or "").strip()
-        # Build 3-4 meeting questions
-        q_prompt = build_generate_meeting_questions_prompt(hypo, qa_json, dialog_blob, count=4)
+            main_obj = {"hypothesis": main_raw.strip(), "reason": ""}
+        if (main_obj.get("hypothesis") or "").strip():
+            hypos.append(main_obj)
+        # two alternatives
+        avoid_titles = (main_obj.get("hypothesis") or "").strip()
+        for _ in range(2):
+            alt_prompt = build_generate_alternative_hypothesis_prompt(
+                qa_json, dialog_blob, examples_text, avoid_hypothesis=avoid_titles, prefer_non_finance=True
+            )
+            alt_raw = await self._invoke_llm(alt_prompt, system=self._system_strict_json)
+            try:
+                alt_obj = json.loads(alt_raw)
+            except Exception:
+                alt_obj = {"hypothesis": alt_raw.strip(), "reason": ""}
+            title = (alt_obj.get("hypothesis") or "").strip()
+            if title:
+                hypos.append(alt_obj)
+                avoid_titles = f"{avoid_titles}; {title}" if avoid_titles else title
+
+        # render 3 hypotheses list
+        items = hypos[:3]
+        hyp_lines: list[str] = []
+        for idx, item in enumerate(items, start=1):
+            title = (item.get("hypothesis") or "").strip()
+            reason = (item.get("reason") or "").strip()
+            hyp_lines.append(
+                (f"<b>{idx}) Гипотеза</b>: <b>{title}</b>\n" + (f"Причина: {reason}" if reason else "")).strip()
+            )
+        # single shared set of 5 meeting questions across all 3 hypotheses
+        combined_title = "Гипотезы:\n" + "\n".join([f"{i+1}) {(items[i].get('hypothesis') or '').strip()}" for i in range(len(items))])
+        q_prompt = build_generate_meeting_questions_prompt(combined_title, qa_json, dialog_blob, count=5)
         q_raw = await self._invoke_llm(q_prompt, system=self._system_strict_json)
         try:
             q_arr = json.loads(q_raw)
         except Exception:
             q_arr = []
-        questions_block = "\n".join([f"• {str(q).strip()}" for q in q_arr[:4]]) if isinstance(q_arr, list) else ""
+        qs = "\n".join([f"• {str(q).strip()}" for q in (q_arr[:5] if isinstance(q_arr, list) else [])])
+        body = "\n\n".join(hyp_lines) + (f"\n\n<b>Вопросы к встрече (5):</b>\n{qs if qs else '—'}" if hyp_lines else "")
+
         # Build appendix with unknowns
         unknown_qs = list(self.meta.get(chat_id, {}).get("unknown_qs", [])) if self.meta.get(chat_id) else []
         appendix = ""
         if unknown_qs:
             appendix = "\n\n<b>Будет полезно узнать у клиента:</b>\n" + "\n".join([f"• {q}" for q in unknown_qs if q])
-        text = (
-            f"<b>Гипотеза</b>: <b>{hypo}</b>\n\n"
-            f"<b>Вопросы к встрече:</b>\n{questions_block if questions_block else '—'}"
-            f"{appendix}"
-        )
+        text = f"Итог:\n\n{body}{appendix}"
         # inline button to request alternative hypothesis
         kb = InlineKeyboardMarkup(
             inline_keyboard=[[InlineKeyboardButton(text="Сгенерировать ещё", callback_data="alt:more")]]
         )
         await message.answer(text, reply_markup=kb)
-        self._log(chat_id, f"FINAL (FREE) HYPOTHESIS: {hypo}")
-        # store last result for avoidance
-        self.last_result[chat_id] = {"hypothesis": hypo, "questions": q_arr[:4] if isinstance(q_arr, list) else []}
+        # store first hypothesis for avoidance in alt round
+        if hypos:
+            first_title = (hypos[0].get("hypothesis") or "").strip()
+            self._log(chat_id, f"FINAL HYPOTHESES: {[ (h.get('hypothesis') or '').strip() for h in hypos[:3] ]}")
+            # keep last_result with shared 5 questions for simplicity
+            self.last_result[chat_id] = {"hypothesis": first_title, "questions": (q_arr[:5] if isinstance(q_arr, list) else [])}
         await state.clear()
 
     async def _ask_theme(self, message: Message, state: FSMContext) -> None:
@@ -428,17 +441,7 @@ class BotApp:
         await message.answer("Остановлюсь здесь. Можем продолжить в любой момент командой /analyze или пришлите материалы.")
         await state.clear()
 
-    async def cmd_survey(self, message: Message, state: FSMContext) -> None:
-        chat_id = message.chat.id
-        self.surveys[chat_id] = SurveySession(step=0, answers={})
-        self.followup_questions.pop(chat_id, None)
-        self.followup_answers.pop(chat_id, None)
-        self.followup_idx.pop(chat_id, None)
-        self.hypotheses_pool.pop(chat_id, None)
-        await message.answer("Начинаем короткий опрос (6 вопросов). Отвечайте кнопками ниже. Для вопросов с множественным выбором используйте кнопку <b>‘Готово’</b>.")
-        q = SURVEY[0]
-        await message.answer(self._render_q_text(q), reply_markup=make_keyboard(q["key"], q["options"], SURVEY_PREFIX, q["multi"]))
-        self._log(chat_id, f"Q: {q['text']}")
+    # survey legacy removed
 
     async def cmd_restart(self, message: Message, state: FSMContext) -> None:
         chat_id = message.chat.id
@@ -482,84 +485,34 @@ class BotApp:
             dump_path.write_text(_json.dumps(parsed, ensure_ascii=False, indent=2), encoding="utf-8")
             self._log(message.chat.id, f"Parsed JSON saved: {dump_path}")
             # Не отправляем JSON в чат по требованию
-            await message.answer("Файл обработан. Продолжаем.")
-            # If waiting for file to start discovery, begin now
-            if self.waiting_file_first.get(message.chat.id):
-                self.waiting_file_first[message.chat.id] = False
-                await self._ask_theme(message, state)
+            await message.answer("Файл обработан. Если есть ещё — просто пришлите следующим сообщением.")
+            # Auto-debounce: start theme after short idle (collect multiple files in one go)
+            chat_id = message.chat.id
+            if self.waiting_file_first.get(chat_id, True):
+                # cancel previous pending task if any
+                task = self.file_debounce_tasks.pop(chat_id, None)
+                if task and not task.done():
+                    task.cancel()
+                async def _delayed_start():
+                    try:
+                        await asyncio.sleep(2.0)
+                        if self.waiting_file_first.get(chat_id, False):
+                            self.waiting_file_first[chat_id] = False
+                            await self._ask_theme(message, state)
+                    except asyncio.CancelledError:
+                        return
+                    except Exception:
+                        logging.exception("debounce start failed")
+                self.file_debounce_tasks[chat_id] = asyncio.create_task(_delayed_start())
         except Exception as e:
             logging.exception("Failed to handle document: %s", e)
             await message.answer("Не удалось обработать файл. Убедитесь, что это корректный DOCX/JSON.")
 
-    async def on_survey_answer(self, cq: CallbackQuery, state: FSMContext) -> None:
-        chat_id = cq.message.chat.id
-        sess = self.surveys.get(chat_id)
-        if not sess:
-            await cq.answer("Сессия не найдена", show_alert=True)
-            return
-        step = sess.step
-        if step >= len(SURVEY):
-            await cq.answer()
-            return
-        q = SURVEY[step]
-        idx = int(cq.data.split(":", 1)[1])
-        option_text = q["options"][idx]
-        if q["multi"]:
-            values = set(sess.answers.get(q["key"], [])) if isinstance(sess.answers.get(q["key"]), list) else set()
-            values.add(option_text)
-            sess.answers[q["key"]] = list(values)
-            await cq.answer("Добавлено (множ. выбор)")
-            # re-render with check marks
-            await cq.message.edit_text(self._render_q_text(q), reply_markup=make_keyboard(q["key"], q["options"], SURVEY_PREFIX, q["multi"], selected=list(values)))
-            return
-        sess.answers[q["key"]] = option_text
-        self._log(chat_id, f"A: {option_text}")
-        sess.step += 1
-        await cq.answer()
-        if sess.step < len(SURVEY):
-            nq = SURVEY[sess.step]
-            # do not erase previous question, send next as a new message
-            await cq.message.answer(self._render_q_text(nq), reply_markup=make_keyboard(nq["key"], nq["options"], SURVEY_PREFIX, nq["multi"]))
-            self._log(chat_id, f"Q: {nq['text']}")
-            return
-        await self._finalize_survey(cq, state)
+    # survey legacy removed
 
-    async def on_survey_next(self, cq: CallbackQuery, state: FSMContext) -> None:
-        chat_id = cq.message.chat.id
-        sess = self.surveys.get(chat_id)
-        if not sess:
-            await cq.answer("Сессия не найдена", show_alert=True)
-            return
-        q = SURVEY[sess.step]
-        if q["multi"] and not sess.answers.get(q["key"]):
-            await cq.answer("Выберите хотя бы один вариант", show_alert=True)
-            return
-        # log selected multi values before moving next
-        if q["multi"]:
-            sel = sess.answers.get(q["key"], [])
-            if isinstance(sel, list):
-                self._log(chat_id, f"A: {', '.join(sel)}")
-        sess.step += 1
-        await cq.answer()
-        if sess.step < len(SURVEY):
-            nq = SURVEY[sess.step]
-            # send a new message to keep history visible
-            await cq.message.answer(self._render_q_text(nq), reply_markup=make_keyboard(nq["key"], nq["options"], SURVEY_PREFIX, nq["multi"]))
-            self._log(chat_id, f"Q: {nq['text']}")
-            return
-        await self._finalize_survey(cq, state)
+    # survey legacy removed
 
-    async def _finalize_survey(self, cq: CallbackQuery, state: FSMContext) -> None:
-        chat_id = cq.message.chat.id
-        sess = self.surveys[chat_id]
-        answers_json = json.dumps(sess.answers, ensure_ascii=False, indent=2)
-        # Initialize dynamic follow-ups flow
-        self.followup_questions[chat_id] = []  # asked
-        self.followup_answers[chat_id] = []
-        self.followup_idx[chat_id] = 0
-        # build initial hypotheses pool from base answers
-        self._update_hypotheses_pool(chat_id)
-        await self._ask_next_followup(cq.message, state)
+    # survey legacy removed
 
     async def on_followup_answer(self, message: Message, state: FSMContext) -> None:
         chat_id = message.chat.id
@@ -578,7 +531,7 @@ class BotApp:
             await self._ask_next_followup(message, state)
             return
         # All answered → select best hypothesis
-        sess = self.surveys[chat_id]
+        sess = self.surveys.get(chat_id) or {}
         combined = {
             **sess.answers,
             "followups": [
@@ -597,7 +550,8 @@ class BotApp:
         dialog_blob = self._compute_context_blob(chat_id)
         asked = self.followup_questions.get(chat_id, [])
         facts_summary = self._build_facts_summary(sess.answers, asked, self.followup_answers[chat_id])
-        final_prompt = build_select_hypothesis_prompt(answers_json, filtered_hypotheses_text, dialog_blob, facts_summary)
+        # legacy survey selection removed
+        final_prompt = ""
         # save prompt snapshot
         try:
             os.makedirs("logs/prompts", exist_ok=True)
@@ -619,17 +573,11 @@ class BotApp:
             reason = ""
         # Validate against facts; if invalid, pick alternative excluding previous
         try:
-            valid_raw = await self._invoke_llm(
-                build_validate_hypothesis_prompt(answers_json, hypo, dialog_blob, facts_summary),
-                system=self._system_strict_json,
-            )
+            valid_raw = "{\"valid\": true}"
             valid = json.loads(valid_raw)
             if isinstance(valid, dict) and not valid.get("valid", True):
                 self._log(chat_id, f"Hypothesis rejected due to: {valid.get('conflicts')}")
-                alt_raw = await self._invoke_llm(
-                    build_select_hypothesis_alternative(answers_json, filtered_hypotheses_text, hypo, dialog_blob, facts_summary),
-                    system=self._system_strict_json,
-                )
+                alt_raw = "{}"
                 try:
                     alt = json.loads(alt_raw)
                     hypo = alt.get("hypothesis") or hypo
@@ -640,7 +588,7 @@ class BotApp:
             pass
         # Try: cosine match the best full card from DOCX blocks against the selected hypothesis text
         # Auto-select sub-hypothesis via LLM against subhypotheses.json
-        subs = self.subrepo.get_subs(hypo)
+        subs = []
         if subs:
             sub_titles = "\n".join([it["title"] for it in subs])
             # Build facts snapshot
@@ -648,8 +596,7 @@ class BotApp:
             answers_json2 = answers_json
             dialog_blob2 = self._compute_context_blob(chat_id)
             facts_summary2 = self._build_facts_summary(sess.answers, self.followup_questions.get(chat_id, []), self.followup_answers.get(chat_id, [])) if sess else ""
-            sub_prompt = build_select_subhypothesis_prompt(answers_json2, hypo, sub_titles, dialog_blob2, facts_summary2)
-            sub_raw = await self._invoke_llm(sub_prompt, system=self._system_strict_json)
+            sub_raw = "{}"
             try:
                 sub_json = json.loads(sub_raw)
                 sub_name = sub_json.get("sub") or subs[0]["title"]
@@ -680,7 +627,7 @@ class BotApp:
         except Exception:
             desc_html = ""
         # Sub-hypothesis block (if available)
-        subs = self.subrepo.get_subs(hypo)
+        subs = []
         subs_block = ""
         if subs:
             parts = ["\n<b>Побочная гипотеза и вопросы:</b>"]
@@ -808,13 +755,7 @@ class BotApp:
 
         dialog_blob = self._compute_context_blob(chat_id)
         candidates_text = "\n".join(self.hypotheses_pool.get(chat_id, []))
-        prompt = build_generate_followups_prompt(
-            answers_json=base_answers_json,
-            count=1,
-            avoid=asked,
-            context=dialog_blob,
-            candidates_text=candidates_text,
-        )
+        prompt = "[]"  # legacy followups removed
         raw = await self._invoke_llm(prompt, system=self._system_strict_json)
         try:
             self._log(chat_id, f"LLM raw (followup next): {raw}")
@@ -832,8 +773,7 @@ class BotApp:
         idx = len(asked)
         # build example answer for UX
         try:
-            from app.prompts.prompts import build_example_answer_prompt
-            example_raw = await self._invoke_llm(build_example_answer_prompt(qtext, base_answers_json, dialog_blob))
+            example_raw = ""
             example = (example_raw or "").strip().strip('`"')
             # trim to first sentence end
             import re as _re
