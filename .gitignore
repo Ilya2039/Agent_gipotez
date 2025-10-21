@@ -11,3 +11,4 @@ venv/
 logs/
 uploads/
 .ipynb_checkpoints/
+data/
