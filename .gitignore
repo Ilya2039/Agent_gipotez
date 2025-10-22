@@ -1,14 +1,32 @@
+### Python
 *.pyc
 __pycache__/
+*.pyo
+*.pyd
 *.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+### Envs
 .env
 .env.*
 venv/
 .venv/
+
+### OS/IDE
 .DS_Store
 .vscode/
 .idea/
+
+### Runtime artifacts
 logs/
 uploads/
 .ipynb_checkpoints/
-data/
+
+### Local data cache (keep root data/ tracked; ignore temp dumps inside)
+data/*.tmp
+data/*.cache
