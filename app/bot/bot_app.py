@@ -36,6 +36,7 @@ import logging
 import os
 from pathlib import Path
 from datetime import datetime
+import time
 from app.parsers.docx_parser import parse_docx_to_json
 from app.data.sub_repo import SubRepo
 
@@ -80,6 +81,8 @@ class BotApp:
         # Track global avoids across alternative rounds
         self.avoid_questions_all: Dict[int, List[str]] = {}
         self.avoid_hypotheses: Dict[int, List[str]] = {}
+        # throttle notice for multiple uploads sent in a burst
+        self.last_upload_notice_at: Dict[int, float] = {}
         # debounce for file uploads (auto-start after last file)
         self.file_debounce_tasks: Dict[int, asyncio.Task] = {}
 
@@ -250,7 +253,7 @@ class BotApp:
             tail = ""
         idx = (self.dynamic_idx.get(chat_id) or 0) + 1
         self.dynamic_idx[chat_id] = idx
-        await message.answer(f"Вопрос {idx}/5 (до 5):\n{qtext}{tail}")
+        await message.answer(f"Вопрос {idx}:\n{qtext}{tail}")
         self._log(chat_id, f"Q: {qtext}")
         await state.set_state(Flow.waiting_dynamic_answer)
 
@@ -335,7 +338,16 @@ class BotApp:
         kb = InlineKeyboardMarkup(
             inline_keyboard=[[InlineKeyboardButton(text="Пропустить", callback_data="theme:skip")]]
         )
-        await message.answer("Какая тема вам интересна для анализа состояния клиента?\n\n<i>Примеры:</i> \n• Состояние относительно конкурентов\n• Организационные ситуации\n• Операцонные ситуации\n• Финансовое положение", reply_markup=kb)
+        await message.answer(
+            "Какая тема вам интересна для анализа состояния клиента?\n\n"
+            "Примеры:\n"
+            "• Доля на рынке\n"
+            "• Организационные ситуации\n"
+            "• Операцонные ситуации\n"
+            "• Финансовое положение\n"
+            "• Состояние относительно конкурентов",
+            reply_markup=kb,
+        )
         await state.set_state(Flow.waiting_theme)
 
     async def on_theme_answer(self, message: Message, state: FSMContext) -> None:
@@ -485,7 +497,15 @@ class BotApp:
             dump_path.write_text(_json.dumps(parsed, ensure_ascii=False, indent=2), encoding="utf-8")
             self._log(message.chat.id, f"Parsed JSON saved: {dump_path}")
             # Не отправляем JSON в чат по требованию
-            await message.answer("Файл обработан. Если есть ещё — просто пришлите следующим сообщением.")
+            # show one consolidated notice per short burst of uploads (2s window)
+            now = time.time()
+            last = self.last_upload_notice_at.get(message.chat.id, 0.0)
+            if now - last > 2.0:
+                await message.answer(
+                    "Помогу выявить гипотезы, описывающие возможные боли и точки роста клиента.\n"
+                    "На их основе составлю полезные для встречи вопросы."
+                )
+                self.last_upload_notice_at[message.chat.id] = now
             # Auto-debounce: start theme after short idle (collect multiple files in one go)
             chat_id = message.chat.id
             if self.waiting_file_first.get(chat_id, True):

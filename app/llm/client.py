@@ -26,7 +26,7 @@ class LLMConfig(BaseModel):
     verify_ssl_certs: bool = False
     scope: str = "GIGACHAT_API_CORP"
     model: str = "GigaChat-2-Reasoning"
-    temperature: float = 0.9
+    temperature: float = 0.8
     timeout: int = 60
     profanity_check: bool = False
 
