@@ -32,17 +32,21 @@ Swagger UI: `http://localhost:8000/docs`
 
 ### Флоу в Swagger UI
 1) `POST /session/start`
-   - `session_id`: любой uid; `theme`: можно пусто. Если пусто — первый `qa/next` спросит тему.
+   - `session_id`: любой uid. Только id — без темы и прочего.
 
 2) `POST /session/upload`
    - Загружайте ПО ОДНОМУ файлу: выбрали → Execute. Повторите для всех файлов с тем же `session_id`.
    - В ответе поле `files` — сколько всего файлов уже учтено. В `logs/bot.log` будет `[upload] ... total=N`, а в `logs/dialogs/<session>.log` — `[FILE] <имя>`.
 
-3) Вопросы
+3) `POST /session/theme`
+   - `session_id`, `theme` — явная установка темы диалога.
+   - Ответ: `{ ok: true, theme: "..." }`. После этого можно сразу вызывать `qa/next`.
+
+4) Вопросы
    - `POST /qa/next` → `{question, example, idx}` (сначала вопрос про тему, затем уточняющие, максимум 5).
    - `POST /qa/answer` → `{next: "ask" | "finalize"}`. Если `finalize` — переходите к финалу.
 
-4) Финализация
+5) Финализация
    - `POST /finalize` → `{ "hypotheses": [{hypothesis, reason} x3], "meeting_questions": [x5], "unknowns": [xN] }`.
    - `unknowns` — список вопросов, где вы отвечали «не знаю» (покажите блоком «Будет полезно узнать у клиента»).
 

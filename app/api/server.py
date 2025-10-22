@@ -104,16 +104,18 @@ class APIApp:
         app = self.app
 
         @app.post("/session/start")
-        def start_session(session_id: str = Form(...), theme: str = Form("")):
+        def start_session(session_id: str = Form(...)):
             sess = self._get_session(session_id)
-            sess.theme = theme.strip()
+            sess.theme = ""
             sess.qa = []
             sess.idx = 0
             sess.unknown_qs = []
-            sess.awaiting_theme = (sess.theme == "")
-            logging.info("[session] start sid=%s theme=%s", session_id, sess.theme)
-            self._log_dialog(session_id, f"== START ==\nTheme: {sess.theme}")
+            sess.awaiting_theme = True
+            logging.info("[session] start sid=%s", session_id)
+            self._log_dialog(session_id, "== START ==")
             return {"ok": True}
+
+        # NOTE: theme endpoint defined AFTER upload below to appear after it in Swagger
 
         @app.post("/session/upload")
         async def upload(session_id: str = Form(...), file: UploadFile = File(...)):
@@ -135,31 +137,60 @@ class APIApp:
             self._log_dialog(session_id, f"[FILE] {file.filename}")
             return {"ok": True, "files": total}
 
+        @app.post("/session/theme")
+        def set_theme(session_id: str = Form(...), theme: str = Form("")):
+            sess = self._get_session(session_id)
+            sess.theme = (theme or "").strip()
+            sess.awaiting_theme = False
+            logging.info("[session] theme sid=%s -> %s", session_id, sess.theme)
+            self._log_dialog(session_id, f"THEME= {sess.theme}")
+            return {"ok": True, "theme": sess.theme}
+
         @app.post("/qa/next", response_model=AskResponse)
         async def next_question(session_id: str = Form(...)):
             sess = self._get_session(session_id)
             # limit 5 questions
             if sess.idx >= 5:
                 raise HTTPException(409, "limit reached")
-            # theme-first flow
+            # theme-first flow (если тема не задана и пользователь не использует /session/theme)
             if sess.awaiting_theme:
                 theme_prompt = (
                     "Какая тема вам интересна для анализа состояния клиента?\n\n"
                     "Примеры:\n"
-                    "• Состояние относительно конкурентов\n"
+                    "• Доля на рынке\n"
                     "• Организационные ситуации\n"
                     "• Операцонные ситуации\n"
-                    "• Финансовое положение"
+                    "• Финансовое положение\n"
+                    "• Состояние относительно конкурентов"
                 )
                 logging.info("[qa] sid=%s THEME_PROMPT", session_id)
                 self._log_dialog(session_id, "THEME?: " + theme_prompt.replace("\n", " "))
                 return AskResponse(question=theme_prompt, example="", idx=0)
+            # генерируем уточняющий вопрос напрямую через промпт, без графа
+            asked = [it.get("question", "") for it in sess.qa if it.get("question")]
+            qa_json = json.dumps(sess.qa, ensure_ascii=False, indent=2)
+            dialog_blob = self._compute_context_blob(sess)
+            examples_text = Path("data/hypotheses.txt").read_text(encoding="utf-8") if Path("data/hypotheses.txt").exists() else ""
+            prompt = build_generate_discovery_question_prompt(
+                qa_json=qa_json,
+                dialog_json=dialog_blob,
+                examples_text=examples_text,
+                avoid=list(set(asked + (sess.avoid_questions_all or []))),
+                count=1,
+                theme=sess.theme,
+                avoid_unknown=sess.unknown_qs,
+            )
             try:
-                qtext = str(self.engine.next_question(sess).get("question") or "Уточните ключевой аспект по теме?").strip()
+                raw = self._invoke_llm(prompt, system=("Ты отвечаешь строго JSON массивом строк."))
+                arr = json.loads(raw)
             except Exception as e:
-                logging.exception("[qa] engine next_question failed: %s", e)
+                logging.exception("[qa] discovery prompt failed: %s", e)
+                arr = []
+            if not isinstance(arr, list) or not arr:
                 theme_txt = (sess.theme or "деятельности компании").strip()
                 qtext = f"Какие ключевые задачи по теме {theme_txt} сейчас наиболее актуальны?"
+            else:
+                qtext = str(arr[0]).strip()
             if not qtext.endswith("?"):
                 qtext = qtext.rstrip(". ") + "?"
             sess.qa.append({"question": qtext, "answer": ""})
