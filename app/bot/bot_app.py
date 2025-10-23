@@ -407,6 +407,11 @@ class BotApp:
             qtext = (obj.get("question") or "Уточните, пожалуйста, ключевой аспект по теме?").strip()
             if not qtext.endswith("?"):
                 qtext = qtext.rstrip(". ") + "?"
+            # avoid duplicates across rounds
+            asked_all = set(self.avoid_questions_all.get(chat_id) or [])
+            if qtext in asked_all:
+                theme_txt = (theme or "текущей теме").strip()
+                qtext = f"Назовите другой аспект по {theme_txt}, который мы ещё не затрагивали?"
             (self.dynamic_qa.setdefault(chat_id, [])).append({"question": qtext, "answer": ""})
             await message.answer(qtext)
             self._log(chat_id, f"Q: {qtext}")
@@ -420,6 +425,14 @@ class BotApp:
         if action == "hypothesis":
             # generate free-form, industry-focused hypothesis
             examples_text = Path("data/hypotheses.txt").read_text(encoding="utf-8") if Path("data/hypotheses.txt").exists() else ""
+            # add avoidance of previous hypotheses explicitly
+            prev_avoids = self.avoid_hypotheses.get(chat_id) or []
+            if prev_avoids:
+                examples_text = (
+                    examples_text
+                    + "\nНЕ ПРЕДЛАГАЙ ЭТИ ГИПОТЕЗЫ (ни в каком перефразе):\n- "
+                    + "\n- ".join(prev_avoids)
+                )
             hyp_prompt = build_generate_free_hypothesis_prompt(theme, qa_json, dialog_blob, examples_text, prefer_non_finance=True)
             hyp_raw = await self._invoke_llm(hyp_prompt, system=self._system_strict_json)
             try:
