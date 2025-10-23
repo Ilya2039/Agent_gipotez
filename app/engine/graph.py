@@ -63,7 +63,7 @@ class GraphEngine:
             return state
 
         def ask(state: SessionSnapshot) -> SessionSnapshot:
-            # If question already proposed by decide, reuse; else generate discovery question
+            # если decide уже дал вопрос — используем; иначе генерим discovery
             qtext = (state.get("question") or "").strip()
             if not qtext:
                 qa_json = json.dumps(state.get("qa") or [], ensure_ascii=False, indent=2)
@@ -154,7 +154,7 @@ class GraphEngine:
         g.add_edge("finalize", END)
         return g.compile()
 
-    # Convenience wrappers used by REST API
+    # Обёртки для REST API
     def next_question(self, sess) -> Dict[str, object]:
         state: SessionSnapshot = {
             "theme": sess.theme,
@@ -184,6 +184,17 @@ class GraphEngine:
         qa_json = json.dumps(sess.qa or [], ensure_ascii=False, indent=2)
         dialog_blob = self._compute_context(sess)
         examples_text = self._examples_text()
+        # inject hard avoid for previous hypotheses
+        try:
+            avoids = [h for h in (getattr(sess, "avoid_hypotheses", []) or []) if h]
+            if avoids:
+                examples_text = (
+                    (examples_text or "")
+                    + "\nНЕ ПРЕДЛАГАЙ ЭТИ ГИПОТЕЗЫ (ни в каком перефразе):\n- "
+                    + "\n- ".join(avoids)
+                )
+        except Exception:
+            pass
         # 3 hypotheses (1 main + 2 alternatives)
         main_raw = self._invoke_llm(
             build_generate_free_hypothesis_prompt(sess.theme or "", qa_json, dialog_blob, examples_text, prefer_non_finance=True),

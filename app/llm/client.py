@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 """
-LLM client (GigaChat) via LangChain.
-- Loads configuration from environment (.env supported)
-- Exposes invoke(prompt, system) for synchronous usage in the bot flow
+Клиент LLM (GigaChat) через LangChain.
 """
 
 import os
@@ -45,7 +43,6 @@ class LLMClient:
         )
         if not LCGigaChat:
             raise RuntimeError("langchain_community GigaChat is not installed.")
-        # Log config (without credentials)
         logging.getLogger(__name__).info(
             "GigaChat cfg: model=%s, temp=%s, scope=%s, verify_ssl=%s, timeout=%s, profanity_check=%s",
             cfg.model,

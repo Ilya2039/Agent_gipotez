@@ -23,8 +23,6 @@ from app.prompts.core import (
 from app.services.unknowns import classify_unknown
 from app.services.examples import generate_short_example
 
-
-# Pydantic models MUST be module-level for FastAPI to resolve annotations
 class AskResponse(BaseModel):
     question: str
     example: str = ""
@@ -45,6 +43,7 @@ class Session(BaseModel):
     avoid_questions_all: List[str] = []
     avoid_hypotheses: List[str] = []
     awaiting_theme: bool = True
+    last_hypotheses: List[str] = []
 
 
 class APIApp:
@@ -64,8 +63,9 @@ class APIApp:
         )
         self._register_routes()
 
-    def _invoke_llm(self, prompt: str, system: Optional[str] = None) -> str:
-        return self.llm.invoke(prompt, system)
+    async def _invoke_llm(self, prompt: str, system: Optional[str] = None) -> str:
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self.llm.invoke, prompt, system)
 
     def _get_session(self, sid: str) -> Session:
         if sid not in self.sessions:
@@ -114,8 +114,7 @@ class APIApp:
             logging.info("[session] start sid=%s", session_id)
             self._log_dialog(session_id, "== START ==")
             return {"ok": True}
-
-        # NOTE: theme endpoint defined AFTER upload below to appear after it in Swagger
+        
 
         @app.post("/session/upload")
         async def upload(session_id: str = Form(...), file: UploadFile = File(...)):
@@ -149,10 +148,10 @@ class APIApp:
         @app.post("/qa/next", response_model=AskResponse)
         async def next_question(session_id: str = Form(...)):
             sess = self._get_session(session_id)
-            # limit 5 questions
+            # максимум 5 вопросов
             if sess.idx >= 5:
                 raise HTTPException(409, "limit reached")
-            # theme-first flow (если тема не задана и пользователь не использует /session/theme)
+            # если тема не задана и пользователь не вызывал /session/theme
             if sess.awaiting_theme:
                 theme_prompt = (
                     "Какая тема вам интересна для анализа состояния клиента?\n\n"
@@ -166,7 +165,7 @@ class APIApp:
                 logging.info("[qa] sid=%s THEME_PROMPT", session_id)
                 self._log_dialog(session_id, "THEME?: " + theme_prompt.replace("\n", " "))
                 return AskResponse(question=theme_prompt, example="", idx=0)
-            # генерируем уточняющий вопрос напрямую через промпт, без графа
+            # генерируем уточняющий вопрос напрямую через промпт
             asked = [it.get("question", "") for it in sess.qa if it.get("question")]
             qa_json = json.dumps(sess.qa, ensure_ascii=False, indent=2)
             dialog_blob = self._compute_context_blob(sess)
@@ -181,7 +180,9 @@ class APIApp:
                 avoid_unknown=sess.unknown_qs,
             )
             try:
-                raw = self._invoke_llm(prompt, system=("Ты отвечаешь строго JSON массивом строк."))
+                raw = await self._invoke_llm(prompt, system=("Ты отвечаешь строго JSON массивом строк."))
+                logging.info("[qa] sid=%s GEN_Q_PROMPT=%s", session_id, prompt.replace("\n", " "))
+                logging.info("[qa] sid=%s GEN_Q_RAW=%s", session_id, (raw or "").strip())
                 arr = json.loads(raw)
             except Exception as e:
                 logging.exception("[qa] discovery prompt failed: %s", e)
@@ -193,6 +194,11 @@ class APIApp:
                 qtext = str(arr[0]).strip()
             if not qtext.endswith("?"):
                 qtext = qtext.rstrip(". ") + "?"
+            # жёстко избегаем дубликатов, если LLM проигнорировал avoid
+            avoid_all = set((sess.avoid_questions_all or []) + [q.get("question", "") for q in sess.qa])
+            if qtext in avoid_all:
+                theme_txt = (sess.theme or "текущей теме").strip()
+                qtext = f"Назовите другой аспект по {theme_txt}, который мы ещё не затрагивали?"
             sess.qa.append({"question": qtext, "answer": ""})
             if qtext not in sess.avoid_questions_all:
                 sess.avoid_questions_all.append(qtext)
@@ -202,16 +208,17 @@ class APIApp:
             logging.info("[qa] sid=%s Q%d: %s", session_id, sess.idx, qtext)
             self._log_dialog(session_id, f"Q{sess.idx}: {qtext}")
             if example:
+                logging.info("[qa] sid=%s EXAMPLE: %s", session_id, example)
                 self._log_dialog(session_id, f"EXAMPLE: {example}")
             return AskResponse(question=qtext, example=example or "", idx=sess.idx)
 
         @app.post("/qa/answer")
         async def post_answer(payload: AnswerIn):
             sess = self._get_session(payload.session_id)
-            # handle theme first
+            # сначала обрабатываем тему
             if sess.awaiting_theme:
                 raw = (payload.answer or "").strip()
-                # treat skip
+                # пропуск темы
                 if raw.lower() in {"", "skip", "пропустить", "не важно", "без темы"}:
                     sess.theme = ""
                 else:
@@ -223,14 +230,20 @@ class APIApp:
             if not sess.qa or sess.qa[-1].get("answer"):
                 raise HTTPException(400, "no pending question")
             sess.qa[-1]["answer"] = payload.answer or ""
-            # track unknowns
+            # определяем 'unknown' промптом LLM (да/нет)
             try:
-                unknown = await classify_unknown(self._invoke_llm, payload.answer or "", "Возвращай только JSON.")
+                unknown = await classify_unknown(
+                    self._invoke_llm,
+                    payload.answer or "",
+                    "Ответь одним словом: 'да' если ответ означает 'не знаю/нет данных', иначе 'нет'.",
+                )
+                logging.info("[qa] sid=%s UNKNOWN_DECISION=%s | answer=%.120s | question=%s", payload.session_id, unknown, (payload.answer or ""), (sess.qa[-1].get("question") or ""))
+                self._log_dialog(payload.session_id, f"UNKNOWN_DECISION={unknown} :: Q={(sess.qa[-1].get('question') or '').strip()}")
                 if unknown:
                     sess.unknown_qs.append(sess.qa[-1].get("question") or "")
             except Exception:
-                pass
-            # decide next action
+                logging.exception("[qa] unknown classification failed")
+            # решаем следующий шаг
             try:
                 act = self.engine.decide_next(sess)
             except Exception as e:
@@ -248,7 +261,7 @@ class APIApp:
             sess = self._get_session(session_id)
             try:
                 res = self.engine.finalize(sess)
-                # strip tags if LLM returned them
+                # убираем tags, если модель их вернула
                 try:
                     for h in (res.get("hypotheses") or []):
                         if isinstance(h, dict) and "tags" in h:
@@ -257,7 +270,7 @@ class APIApp:
                     pass
             except Exception as e:
                 logging.exception("[finalize] engine finalize failed: %s", e)
-                # minimal fallback
+                # минимальный фолбэк
                 theme_txt = (self._get_session(session_id).theme or "клиент").strip()
                 res = {
                     "hypotheses": [
@@ -274,7 +287,12 @@ class APIApp:
             unknowns = list(sess.unknown_qs)
             logging.info("[finalize] sid=%s hypos=%s | qs=%d", session_id, [ (h.get('hypothesis') or '') for h in res.get('hypotheses', []) ], len(res.get('meeting_questions', [])))
             res["unknowns"] = unknowns
-            # write dialog summary
+            # запоминаем последние гипотезы для избегания повторов
+            try:
+                sess.last_hypotheses = [ (h.get("hypothesis") or "").strip() for h in (res.get("hypotheses") or []) ]
+            except Exception:
+                sess.last_hypotheses = []
+            # итог диалога в лог
             self._log_dialog(session_id, "== FINAL ==")
             for i, h in enumerate(res.get("hypotheses", [])[:3], start=1):
                 self._log_dialog(session_id, f"H{i}: {(h.get('hypothesis') or '')}")
@@ -285,6 +303,20 @@ class APIApp:
                 for u in unknowns:
                     self._log_dialog(session_id, f"- {u}")
             return res
+
+        @app.post("/alt/start")
+        def alt_start(session_id: str = Form(...)):
+            sess = self._get_session(session_id)
+            # добавляем последние гипотезы в список avoid
+            merged = set(sess.avoid_hypotheses or []) | set(sess.last_hypotheses or [])
+            sess.avoid_hypotheses = sorted({h for h in merged if h})
+            # сбрасываем состояние раунда
+            sess.qa = []
+            sess.idx = 0
+            sess.unknown_qs = []
+            logging.info("[alt] start sid=%s avoids=%d", session_id, len(sess.avoid_hypotheses))
+            self._log_dialog(session_id, "== ALT ROUND ==")
+            return {"ok": True, "avoids": len(sess.avoid_hypotheses)}
 
 
 def create_app() -> FastAPI:
