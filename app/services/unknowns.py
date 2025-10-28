@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 """
-Service helpers for handling "unknown" user answers.
+Назначение: классификация ответов пользователя на предмет "не знаю".
 """
 
 from app.prompts.core import build_is_unknown_answer_prompt
 
 
 async def classify_unknown(invoke_llm, answer: str, system: str) -> bool:
-    """Return True if the LLM classifies the answer as 'unknown'.
+    """Возвращает True, если LLM классифицировал ответ как "не знаю".
 
     invoke_llm: callable(prompt: str, system: str|None) -> str
     """
