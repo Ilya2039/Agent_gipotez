@@ -54,7 +54,6 @@ from app.bot.texts import (
 
 class BotApp:
     def __init__(self, token: str) -> None:
-        """Инициализирует бота, LLM и хранилища состояния диалога."""
         ensure_logging()
         self.bot = Bot(token=token, default=DefaultBotProperties(parse_mode="HTML"))
         self.dp = Dispatcher()
@@ -96,16 +95,57 @@ class BotApp:
         )
         await message.answer(upload_prompt)
 
+        # <-- изменено: дебаунс, если файлов нет, автоматически стартуем
+        async def delayed_start():
+            await asyncio.sleep(10)  # ждём 10 секунд после /start
+            if self.waiting_file_first.get(chat_id):
+                self.waiting_file_first[chat_id] = False
+                await self._start_preface_or_goals(message, state)
+
+        self._create_task(delayed_start())
+
     async def cmd_skip(self, message: Message, state: FSMContext) -> None:
-        """Команда /skip: пропускает файлы и переходит к выбору темы."""
+        """Команда /skip: пропускает файлы и переходит к целям/потоку вопросов."""
         chat_id = message.chat.id
         if not self.waiting_file_first.get(chat_id):
             await message.answer("Уже идём по вопросам.")
             return
         self.waiting_file_first[chat_id] = False
-        await message.answer("Пропустить")
+        # <-- изменено: сразу стартуем префейс или цели
+        await self._start_preface_or_goals(message, state)
+
+    async def _after_first_upload(self, message: Message, state: FSMContext) -> None:
+        """Вызывается после первой загрузки: префейс и затем тема или вопросы про цели."""
+        chat_id = message.chat.id
+        if self.waiting_file_first.get(chat_id, False):
+            self.waiting_file_first[chat_id] = False
+            await self._start_preface_or_goals(message, state)
+    
+    async def _start_preface_or_goals(self, message: Message, state: FSMContext) -> None:
+        """
+        Запускает префейс, если есть файлы, или сразу разговор про цели, если файлов нет.
+        """
+        chat_id = message.chat.id
+        has_files = bool(self.dialog_docs_json_list.get(chat_id))
+
+        # Помечаем, что префейс показан, чтобы не показывать его снова
         mark_preface_shown(self, chat_id)
-        await show_preface(self, message, state)
+
+        if has_files:
+            # Файлы есть → показываем префейс
+            await show_preface(self, message, state)
+        else:
+            # Файлов нет → сразу разговор про цели
+            await self._ask_goals_prompt(message, state)
+
+    async def _ask_goals_prompt(self, message: Message, state: FSMContext) -> None:
+        """Показывает вопрос о целях/беспокойствах (если файлов нет)."""
+        await message.answer(
+            "Спасибо! Идём дальше! Подскажите, с какими целями (долгосрочными или краткосрочными) клиента вы знакомы?\nО чём сейчас беспокоится ваш клиент?"
+        )
+        await state.set_state(Flow.preface2)
+
+    # Остальной код остаётся без изменений
 
     async def on_dynamic_answer(self, message: Message, state: FSMContext) -> None:
         """Обрабатывает ответ пользователя на очередной динамический вопрос."""
