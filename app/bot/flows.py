@@ -14,8 +14,10 @@ from app.prompts.core import (
     build_generate_free_hypothesis_prompt,
     build_generate_alternative_hypothesis_prompt,
     build_generate_meeting_questions_prompt,
+    build_refine_hypotheses_prompt,
 )
-from app.bot.ui import build_alt_keyboard, format_question
+from app.bot.ui import build_alt_keyboard, format_question, build_actions_keyboard
+from app.bot.texts import ACTIONS_PROMPT, BTN_CORRECT, BTN_MORE, HELPFUL_TO_KNOW_TITLE
 from app.bot.states import Flow
 from app.services.examples import generate_short_example
 from app.bot.states import Flow
@@ -107,7 +109,6 @@ async def finalize_dynamic_hypothesis(app, message, state: FSMContext) -> None:
             hypos.append(alt_obj)
             avoid_titles = f"{avoid_titles}; {title}" if avoid_titles else title
     items = hypos[:3]
-    blocks: list[str] = []
     for idx, item in enumerate(items, start=1):
         title = (item.get("hypothesis") or "").strip()
         reason = (item.get("reason") or "").strip()
@@ -120,23 +121,102 @@ async def finalize_dynamic_hypothesis(app, message, state: FSMContext) -> None:
             q_arr = []
         qs_list = [str(q).strip() for q in (q_arr[:3] if isinstance(q_arr, list) else [])]
         bullets = "\n".join([f"- {q}" for q in qs_list]) if qs_list else "- —"
-        # Формат: Гипотеза (жирным) + пробел + "Причина:" + текст; пустая строка; затем вопросы
         reason_txt = f"Причина: {reason}" if reason else ""
-        # Оформление под требование: заголовок "Гипотеза:" + текст гипотезы — жирным;
-        # затем пустая строка, причина обычным, затем пустая строка и список вопросов
         block = (f"<b>Гипотеза: {title}</b>\n\n" + reason_txt + ("\n\n" + bullets))
-        blocks.append(block)
-    body = "\n\n".join(blocks)
+        await message.answer(block)
+
+    # Блок "Будет полезно узнать у клиента" + примеры ответов
     unknown_qs = list(app.meta.get(chat_id, {}).get("unknown_qs", [])) if app.meta.get(chat_id) else []
-    appendix = ""
     if unknown_qs:
-        appendix = "\n\n<b>Будет полезно узнать у клиента:</b>\n" + "\n".join([f"• {q}" for q in unknown_qs if q])
-    text = f"{body}{appendix}"
-    await message.answer(text, reply_markup=build_alt_keyboard("Сгенерировать ещё"))
+        lines = [f"<b>{HELPFUL_TO_KNOW_TITLE}</b>"]
+        for q in unknown_qs:
+            if not q:
+                continue
+            try:
+                ex = await generate_short_example(app._invoke_llm, q, qa_json, dialog_blob)
+            except Exception:
+                ex = ""
+            lines.append(q + (f"\nПример ответа: {ex}" if ex else ""))
+        await message.answer("\n\n".join(lines))
+
+    # Сообщение с действиями
+    await message.answer(ACTIONS_PROMPT, reply_markup=build_actions_keyboard(BTN_CORRECT, BTN_MORE))
     if hypos:
         first_title = (hypos[0].get("hypothesis") or "").strip()
         app._log(chat_id, f"FINAL HYPOTHESES: {[ (h.get('hypothesis') or '').strip() for h in hypos[:3] ]}")
-        app.last_result[chat_id] = {"hypothesis": first_title, "questions": (q_arr[:5] if isinstance(q_arr, list) else [])}
+        app.last_result[chat_id] = {"hypothesis": first_title}
+        # Сохраняем последние 3 гипотезы для корректировки
+        app.last_hypotheses[chat_id] = hypos[:3]
+    await state.clear()
+
+
+async def refine_hypotheses(app, message, state: FSMContext, correction_text: str) -> None:
+    """Пересобирает 3 гипотезы с учётом замечаний КМ, оставляя без изменений те, что не упомянуты."""
+    chat_id = message.chat.id
+    last_hypos = app.last_hypotheses.get(chat_id) or []
+    if not last_hypos:
+        # Если нет предыдущих гипотез — вызываем обычную финализацию
+        await finalize_dynamic_hypothesis(app, message, state)
+        return
+    
+    qa = app.dynamic_qa.get(chat_id) or []
+    qa_json = json.dumps(qa, ensure_ascii=False, indent=2)
+    dialog_blob = app._compute_context_blob(chat_id)
+    examples_text = Path("data/hypotheses.txt").read_text(encoding="utf-8") if Path("data/hypotheses.txt").exists() else ""
+    
+    hypos_json = json.dumps(last_hypos, ensure_ascii=False, indent=2)
+    refine_prompt = build_refine_hypotheses_prompt(hypos_json, correction_text, qa_json, dialog_blob, examples_text)
+    
+    try:
+        refine_raw = await app._invoke_llm(refine_prompt, system=app._system_strict_json)
+        refined_arr = json.loads(refine_raw)
+        if isinstance(refined_arr, list) and len(refined_arr) == 3:
+            hypos = refined_arr
+        else:
+            hypos = last_hypos
+    except Exception:
+        hypos = last_hypos
+    
+    # Отправляем 3 гипотезы отдельными сообщениями
+    for idx, item in enumerate(hypos[:3], start=1):
+        title = (item.get("hypothesis") or "").strip()
+        reason = (item.get("reason") or "").strip()
+        # Для каждой гипотезы 2-3 вопроса
+        q_prompt = build_generate_meeting_questions_prompt(title, qa_json, dialog_blob, count=3)
+        q_raw = await app._invoke_llm(q_prompt, system=app._system_strict_json)
+        try:
+            q_arr = json.loads(q_raw)
+        except Exception:
+            q_arr = []
+        qs_list = [str(q).strip() for q in (q_arr[:3] if isinstance(q_arr, list) else [])]
+        bullets = "\n".join([f"- {q}" for q in qs_list]) if qs_list else "- —"
+        reason_txt = f"Причина: {reason}" if reason else ""
+        block = (f"<b>Гипотеза: {title}</b>\n\n" + reason_txt + ("\n\n" + bullets))
+        await message.answer(block)
+    
+    # Блок "Будет полезно узнать у клиента" + примеры ответов
+    unknown_qs = list(app.meta.get(chat_id, {}).get("unknown_qs", [])) if app.meta.get(chat_id) else []
+    if unknown_qs:
+        lines = [f"<b>{HELPFUL_TO_KNOW_TITLE}</b>"]
+        for q in unknown_qs:
+            if not q:
+                continue
+            try:
+                ex = await generate_short_example(app._invoke_llm, q, qa_json, dialog_blob)
+            except Exception:
+                ex = ""
+            lines.append(q + (f"\nПример ответа: {ex}" if ex else ""))
+        await message.answer("\n\n".join(lines))
+    
+    # Сообщение с действиями
+    await message.answer(ACTIONS_PROMPT, reply_markup=build_actions_keyboard(BTN_CORRECT, BTN_MORE))
+    
+    # Обновляем last_hypotheses и last_result
+    app.last_hypotheses[chat_id] = hypos[:3]
+    if hypos:
+        first_title = (hypos[0].get("hypothesis") or "").strip()
+        app.last_result[chat_id] = {"hypothesis": first_title}
+    
     await state.clear()
 
 

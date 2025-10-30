@@ -88,6 +88,7 @@ async def on_preface_step1_answer(app, message: Message, state: FSMContext) -> N
         items = "\n".join([f"{i+1}. {t}" for i, t in enumerate(clean)])
         rec = app.meta.get(message.chat.id, {})
         rec["awaiting_overdue_answer"] = True
+        rec["overdue_list"] = clean  # Сохраняем список просроченных договорённостей
         app.meta[message.chat.id] = rec
         await message.answer(
             f"{PREFACE_STEP2}\n\n{items}\n\nДействительно ли выполнены договорённости, срок по которым уже истёк?\nСталкивался ли клиент со сложностями в рамках их выполнения?"
@@ -134,6 +135,12 @@ async def on_preface_step2_answer(app, message: Message, state: FSMContext) -> N
 
     rec["preface_goals"] = goals
     agreements = list(rec.get("preface_agreements", []))
+    # Исключаем просроченные договорённости из списка
+    overdue_list = rec.get("overdue_list", [])
+    if overdue_list:
+        overdue_set = set([o.lower().strip() for o in overdue_list])
+        agreements = [a for a in agreements if a.lower().strip() not in overdue_set]
+    
     combined: List[str] = []
     combined.extend(goals)
     combined.extend(agreements)

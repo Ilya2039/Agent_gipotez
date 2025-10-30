@@ -27,3 +27,11 @@ def format_question(idx: int, qtext: str, example_prefix: str, example: str | No
     return f"Вопрос {idx}:\n{qtext}{tail}"
 
 
+def build_actions_keyboard(btn_correct: str, btn_more: str) -> InlineKeyboardMarkup:
+    """Клавиатура с двумя кнопками: корректировка и новые гипотезы (в один ряд)."""
+    row = [
+        InlineKeyboardButton(text=btn_correct, callback_data="actions:correct"),
+        InlineKeyboardButton(text=btn_more, callback_data="actions:more"),
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=[row])
+

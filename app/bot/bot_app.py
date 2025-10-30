@@ -76,6 +76,7 @@ class BotApp:
         self.dynamic_theme: Dict[int, str] = {}
         self.last_upload_notice_at: Dict[int, float] = {}
         self.file_debounce_tasks: Dict[int, asyncio.Task] = {}
+        self.last_hypotheses: Dict[int, List[Dict[str, str]]] = {}
 
     async def start(self) -> None:
         """Запускает поллинг и регистрирует хендлеры."""
@@ -95,24 +96,15 @@ class BotApp:
         )
         await message.answer(upload_prompt)
 
-        # <-- изменено: дебаунс, если файлов нет, автоматически стартуем
-        async def delayed_start():
-            await asyncio.sleep(10)  # ждём 10 секунд после /start
-            if self.waiting_file_first.get(chat_id):
-                self.waiting_file_first[chat_id] = False
-                await self._start_preface_or_goals(message, state)
-
-        self._create_task(delayed_start())
-
     async def cmd_skip(self, message: Message, state: FSMContext) -> None:
         """Команда /skip: пропускает файлы и переходит к целям/потоку вопросов."""
-        chat_id = message.chat.id
-        if not self.waiting_file_first.get(chat_id):
-            await message.answer("Уже идём по вопросам.")
-            return
-        self.waiting_file_first[chat_id] = False
-        # <-- изменено: сразу стартуем префейс или цели
-        await self._start_preface_or_goals(message, state)
+        # Теперь пропуск отключён — ждём загрузки файлов
+        upload_prompt = (
+            "Сначала пришлите ВСЕ доступные материалы по клиенту (.docx или .json).\n"
+            "Я автоматически начну вопросы через пару секунд после последнего файла. Если файлов нет — напишите /skip"
+        )
+        await message.answer(upload_prompt)
+        return
 
     async def _after_first_upload(self, message: Message, state: FSMContext) -> None:
         """Вызывается после первой загрузки: префейс и затем тема или вопросы про цели."""
@@ -317,6 +309,37 @@ class BotApp:
 
     async def on_preface_step3_answer(self, message: Message, state: FSMContext) -> None:
         await preface_step3_handler(self, message, state)
+
+    async def on_actions_more(self, cq: CallbackQuery, state: FSMContext) -> None:
+        """Кнопка 'Получить еще гипотезы' — начинаем новый цикл вопросов."""
+        try:
+            await cq.answer()
+        except Exception:
+            pass
+        await self.on_alt_more(cq, state)
+
+    async def on_actions_correct(self, cq: CallbackQuery, state: FSMContext) -> None:
+        """Кнопка 'Скоректировать текущие' — спрашиваем замечания пользователя."""
+        from app.bot.texts import ASK_CORRECTIONS
+        try:
+            await cq.answer()
+        except Exception:
+            pass
+        await cq.message.answer(ASK_CORRECTIONS)
+        await state.set_state(Flow.waiting_corrections)
+
+    async def on_corrections_message(self, message: Message, state: FSMContext) -> None:
+        """Получает замечания по гипотезам и пересобирает их с учётом комментариев."""
+        chat_id = message.chat.id
+        # Добавляем исправления в историю для контекста
+        qa = self.dynamic_qa.get(chat_id) or []
+        qa.append({"question": "Корректировки по гипотезам", "answer": message.text or ""})
+        self.dynamic_qa[chat_id] = qa
+        from app.bot.texts import CORRECTIONS_DONE
+        from app.bot.flows import refine_hypotheses
+        await message.answer(CORRECTIONS_DONE)
+        # Пересобираем гипотезы с учётом замечаний
+        await refine_hypotheses(self, message, state, message.text or "")
 
 
 async def run_bot() -> None:

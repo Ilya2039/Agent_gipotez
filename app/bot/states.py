@@ -14,5 +14,6 @@ class Flow(StatesGroup):
     preface1 = State()
     preface2 = State()
     preface3 = State()
+    waiting_corrections = State()
 
 
