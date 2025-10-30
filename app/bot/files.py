@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 
 from app.parsers.docx_parser import parse_docx_to_json
+from app.bot.utils import compute_context_blob
 FILE_UNSUPPORTED_MSG = ""
 FILE_FAIL_MSG = ""
 FILE_NOTICE_MSG = ""
@@ -50,6 +51,26 @@ async def handle_document(app, message, state) -> None:
         merged_json = {"docs": all_docs}  # Мерджим все файлы в один объект
         dump_path.write_text(json.dumps(merged_json, ensure_ascii=False, indent=2), encoding="utf-8")
         app._log(message.chat.id, f"Merged JSON saved: {dump_path}")
+        # Снимок контекста: все документы объединены
+        try:
+            blob = compute_context_blob(app, message.chat.id, limit=50000)
+            Path("logs/examples").mkdir(parents=True, exist_ok=True)
+            snap_path = Path("logs/examples") / f"{message.chat.id}_{int(time.time())}.json"
+            snap_path.write_text(blob, encoding="utf-8")
+            app._log(
+                message.chat.id,
+                f"EXAMPLES_SNAPSHOT: {snap_path} | docs={len(all_docs)} | bytes={len(blob)}"
+            )
+            app._log(message.chat.id, "EXAMPLES_TRIM:\n" + (blob[:2000] or "(empty)"))
+            # Пишем служебный индекс (кол-во файлов и имена)
+            index_path = Path("logs/examples") / f"{message.chat.id}_index.txt"
+            names = ", ".join([str(Path(dump_path).name)])
+            index_path.write_text(
+                f"docs={len(all_docs)}; last_file={doc.file_name}; snapshot={snap_path.name}\n",
+                encoding="utf-8",
+            )
+        except Exception:
+            logging.exception("context snapshot failed")
 
         # Ставим debounce для старта
         chat_id = message.chat.id
