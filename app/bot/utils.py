@@ -42,15 +42,17 @@ def extract_json_array(raw: str):
     return []
 
 
-def compute_context_blob(app, chat_id: int) -> str:
-    """Собирает компактный JSON-контекст из загруженных материалов для чата."""
-    docs = app.dialog_docs_json_list.get(chat_id) or ([] if app.dialog_docs_json.get(chat_id) is None else [app.dialog_docs_json[chat_id]])
+def compute_context_blob(app, chat_id: int, limit: int = 8000) -> str:
+    """Собирает компактный JSON‑контекст из ВСЕХ загруженных материалов для чата.
+    limit — ограничение длины результата (символов).
+    """
+    docs = app.dialog_docs_json_list.get(chat_id) or []
     if not docs:
         return ""
     try:
         parts = [json.dumps(d, ensure_ascii=False) for d in docs]
         blob = "\n\n".join(parts)
-        return blob[:8000]
+        return blob[:limit]
     except Exception:
         return ""
 

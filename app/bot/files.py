@@ -51,6 +51,22 @@ async def handle_document(app, message, state) -> None:
         merged_json = {"docs": all_docs}  # Мерджим все файлы в один объект
         dump_path.write_text(json.dumps(merged_json, ensure_ascii=False, indent=2), encoding="utf-8")
         app._log(message.chat.id, f"Merged JSON saved: {dump_path}")
+        # Пишем цельный текст всех документов в logs/all_context.txt
+        try:
+            lines = []
+            for d in all_docs:
+                for sec in (d.get("sections") or []):
+                    h = sec.get("heading")
+                    if h:
+                        lines.append(str(h))
+                    for t in (sec.get("text") or []):
+                        lines.append(str(t))
+            all_text = ("\n".join(lines)).strip()
+            Path("logs").mkdir(parents=True, exist_ok=True)
+            Path("logs/all_context.txt").write_text(all_text, encoding="utf-8")
+            app._log(message.chat.id, f"ALL_CONTEXT_WRITTEN: {len(all_text)} chars")
+        except Exception:
+            logging.exception("all_context write failed")
         # Снимок контекста: все документы объединены
         try:
             blob = compute_context_blob(app, message.chat.id, limit=50000)

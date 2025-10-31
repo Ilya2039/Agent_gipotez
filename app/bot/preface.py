@@ -27,6 +27,8 @@ from app.prompts.core import (
     build_extract_overdue_agreements_prompt,
     build_filter_goals_prompt,
 )
+from app.bot.utils import compute_context_blob
+from app.bot.utils import extract_json_array
 
 
 async def show_preface(app, message: Message, state: FSMContext) -> None:
@@ -43,14 +45,17 @@ async def show_preface(app, message: Message, state: FSMContext) -> None:
 
 async def llm_extract_agreements(app, chat_id: int) -> List[str]:
     """Извлекает текущие договорённости из контекста с помощью LLM (строгий JSON)."""
-    dialog_blob = app._compute_context_blob(chat_id)
+    dialog_blob = compute_context_blob(app, chat_id, limit=30000)
     prompt = build_extract_agreements_prompt(dialog_blob)
     try:
+        # Полный контекст и промпт печатаем в консоль для отладки
+        print("\n=== AGREEMENTS_CONTEXT START ===\n" + dialog_blob + "\n=== AGREEMENTS_CONTEXT END ===")
+        print("\n=== AGREEMENTS_PROMPT START ===\n" + prompt + "\n=== AGREEMENTS_PROMPT END ===")
+        app._log(chat_id, f"AGREEMENTS_PROMPT(len)={len(prompt)}")
         raw = await app._invoke_llm(prompt, system=app._system_strict_json)
-        import json as _json
-
-        arr = _json.loads(raw)
-        if isinstance(arr, list):
+        app._log(chat_id, f"AGREEMENTS_RAW: {raw}")
+        arr = extract_json_array(raw)
+        if isinstance(arr, list) and arr:
             return [str(x)[:140].strip() for x in arr][:8]
     except Exception:
         pass
@@ -66,13 +71,16 @@ def mark_preface_shown(app, chat_id: int) -> None:
 
 async def llm_extract_overdue_agreements(app, chat_id: int) -> List[str]:
     """Ищет договорённости с дедлайнами в прошлом (через LLM)."""
-    dialog_blob = app._compute_context_blob(chat_id)
+    dialog_blob = compute_context_blob(app, chat_id, limit=30000)
     prompt = build_extract_overdue_agreements_prompt(dialog_blob, datetime.now().date().isoformat())
     try:
+        # Печать полного контекста и промпта в терминал
+        print("\n=== OVERDUE_CONTEXT START ===\n" + dialog_blob + "\n=== OVERDUE_CONTEXT END ===")
+        print("\n=== OVERDUE_PROMPT START ===\n" + prompt + "\n=== OVERDUE_PROMPT END ===")
+        app._log(chat_id, f"OVERDUE_PROMPT(len)={len(prompt)}")
         raw = await app._invoke_llm(prompt, system=app._system_strict_json)
-        import json as _json
-
-        arr = _json.loads(raw)
+        app._log(chat_id, f"OVERDUE_RAW: {raw}")
+        arr = extract_json_array(raw)
         if isinstance(arr, list):
             return [str(x)[:140].strip() for x in arr][:8]
     except Exception:

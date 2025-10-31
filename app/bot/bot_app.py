@@ -163,7 +163,9 @@ class BotApp:
         try:
             qa_json_dec = json.dumps(self.dynamic_qa.get(chat_id) or [], ensure_ascii=False, indent=2)
             decision_raw = await self._invoke_llm(
-                build_decide_next_action_prompt(self.dynamic_theme.get(chat_id, ""), qa_json_dec, compute_context_blob(self, chat_id), prefer_non_finance=True),
+                build_decide_next_action_prompt(
+                    self.dynamic_theme.get(chat_id, ""), qa_json_dec, self._compute_context_blob(chat_id), prefer_non_finance=True
+                ),
                 system=self._system_strict_json,
             )
             decision = json.loads(decision_raw)
@@ -222,12 +224,14 @@ class BotApp:
         await self._start_discovery(cq.message, state)
 
     async def on_alt_more(self, cq: CallbackQuery, state: FSMContext) -> None:
-        """Начинает новый раунд: добавляет текущую гипотезу в avoid и возвращается к теме."""
+        """Начинает новый раунд: добавляет все показанные гипотезы в avoid и возвращается к теме."""
         chat_id = cq.message.chat.id
-        prev = self.last_result.get(chat_id) or {}
-        prev_hypo = str(prev.get("hypothesis") or "")
-        if prev_hypo:
-            self.avoid_hypotheses.setdefault(chat_id, []).append(prev_hypo)
+        # учитываем все 3 прошлые гипотезы
+        last_hypos = self.last_hypotheses.get(chat_id, [])
+        for h in last_hypos:
+            title = str(h.get("hypothesis") or "").strip()
+            if title:
+                self.avoid_hypotheses.setdefault(chat_id, []).append(title)
         self.dynamic_qa[chat_id] = []
         self.dynamic_idx[chat_id] = 0
         try:
@@ -239,17 +243,9 @@ class BotApp:
     async def on_document(self, message: Message, state: FSMContext) -> None:
         """Проксирует обработку загрузок документов (.docx/.json)."""
         await handle_document(self, message, state)
-        # после первого успешного файла показываем префейс сразу (и отменяем дебаунс)
-        chat_id = message.chat.id
-        task = self.file_debounce_tasks.pop(chat_id, None)
-        if task and not task.done():
-            task.cancel()
-        # если уже показали префейс — ничего не делаем
-        if self.meta.get(chat_id, {}).get("preface_shown"):
-            return
-        self.waiting_file_first[chat_id] = False
-        mark_preface_shown(self, chat_id)
-        await show_preface(self, message, state)
+        # Важно: не отменяем дебаунс и не запускаем префейс здесь.
+        # files.handle_document сам ставит 2‑секундный debounce, чтобы успели прийти все файлы из одного сообщения.
+        # Пусть старт префейса произойдёт из _after_first_upload по таймеру.
 
     async def _invoke_llm(self, prompt: str, system: str | None = None) -> str:
         """Асинхронно вызывает LLM (синхронный клиент в отдельном пуле)."""
@@ -257,9 +253,9 @@ class BotApp:
         return await loop.run_in_executor(None, self.llm.invoke, prompt, system)
 
     # утилиты для flows/files
-    def _compute_context_blob(self, chat_id: int) -> str:
-        """Возвращает укороченный JSON‑контекст из загруженных файлов для чата."""
-        return compute_context_blob(self, chat_id)
+    def _compute_context_blob(self, chat_id: int, limit: int | None = None) -> str:
+        """Возвращает JSON‑контекст из загруженных файлов для чата (ограничение по длине опционально)."""
+        return compute_context_blob(self, chat_id, limit if limit is not None else 8000)
 
     def _log(self, chat_id: int, line: str) -> None:
         """Пишет строку в файл диалога."""
@@ -278,13 +274,13 @@ class BotApp:
         return asyncio.create_task(coro)
 
     async def _after_first_upload(self, message: Message, state: FSMContext) -> None:
-        """Вызывается после первой загрузки: префейс и затем тема."""
+        """Вызывается после первой загрузки: запускает префейс по готовности."""
         chat_id = message.chat.id
         if self.waiting_file_first.get(chat_id, False):
             self.waiting_file_first[chat_id] = False
             if not self.meta.get(chat_id, {}).get("preface_shown"):
-                self._mark_preface_shown(chat_id)
-                await self._show_preface(message, state)
+                mark_preface_shown(self, chat_id)
+                await show_preface(self, message, state)
 
     # _show_preface вынесен в app.bot.preface.show_preface
 
