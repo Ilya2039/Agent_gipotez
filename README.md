@@ -46,7 +46,8 @@ GIGACHAT_PROFANITY_CHECK=false
   - `utils.py` — лог/контекст/JSON‑утилиты.
 
 - FastAPI (`app/api/`):
-  - `server.py` — `POST /chat`. Поддерживает `docs` (сырые строки) и `docs_paths` (пути к файлам `.docx`/`.json`/`.txt`). Логика совпадает с TG.
+  - `graph.py` — весь движок диалога и сборка LangGraph (узлы, состояния, сохранение гипотез).
+  - `server.py` — только FastAPI, одна ручка `POST /chat`, прокси к `graph.invoke(...)`.
 
 Артефакты:
 - `gipotez/all_gipotez.txt` — накопительный файл согласованных гипотез (plain text).
@@ -271,21 +272,7 @@ curl -sS -X POST http://localhost:8000/chat \
 {"messages":["Вопрос 2:\nПочему снизились темпы роста чистой прибыли при увеличении выручки?"],"stage":"discovery","idx":2}
 ```
 
-#### 5) Получение 3 гипотез
-```bash
-curl -sS -X POST http://localhost:8000/chat \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "session_id": "s1",
-    "user_input": "Не знаю"
-  }'
-```
-Пример ответа (сокращён фрагмент):
-```json
-{"messages":["Гипотеза: ...","Гипотеза: ...","Гипотеза: ..."],"stage":"final","idx":5}
-```
-
-#### 6) Сохранить согласованные гипотезы
+#### 5) Сохранить согласованные гипотезы
 ```bash
 curl -sS -X POST http://localhost:8000/chat \
   -H 'Content-Type: application/json' \
@@ -299,7 +286,7 @@ curl -sS -X POST http://localhost:8000/chat \
 {"messages":["Согласовано. Сохранила гипотезы и сформирую повестку к встрече."],"stage":"final","idx":5}
 ```
 
-#### 7) Новый раунд
+#### 6) Новый раунд
 ```bash
 curl -sS -X POST http://localhost:8000/chat \
   -H 'Content-Type: application/json' \
@@ -313,7 +300,7 @@ curl -sS -X POST http://localhost:8000/chat \
 {"messages":["Новый раунд.","Вопрос 1:\nКаковы основные причины снижения чистой прибыли холдинга на 40,3% в 2024 году?"],"stage":"discovery","idx":1}
 ```
 
-#### 8) Корректировка текущих гипотез (работает и на финальной стадии)
+#### 7) Корректировка текущих гипотез (работает и на финальной стадии)
 ```bash
 curl -sS -X POST http://localhost:8000/chat \
   -H 'Content-Type: application/json' \
