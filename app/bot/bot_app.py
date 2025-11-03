@@ -77,6 +77,7 @@ class BotApp:
         self.last_upload_notice_at: Dict[int, float] = {}
         self.file_debounce_tasks: Dict[int, asyncio.Task] = {}
         self.last_hypotheses: Dict[int, List[Dict[str, str]]] = {}
+        self.last_hypotheses_messages: Dict[int, List[str]] = {}
 
     async def start(self) -> None:
         """Запускает поллинг и регистрирует хендлеры."""
@@ -323,6 +324,28 @@ class BotApp:
             pass
         await cq.message.answer(ASK_CORRECTIONS)
         await state.set_state(Flow.waiting_corrections)
+
+    async def on_actions_agree(self, cq: CallbackQuery, state: FSMContext) -> None:
+        """Сохраняет текущие 3 гипотезы (последние показанные сообщения) в txt файл и подтверждает."""
+        import re
+        from pathlib import Path
+        chat_id = cq.message.chat.id
+        try:
+            await cq.answer()
+        except Exception:
+            pass
+        msgs = self.last_hypotheses_messages.get(chat_id) or []
+        if not msgs:
+            # Нечего сохранять
+            await cq.message.answer("Мне нечего сохранить: сначала сформируйте гипотезы.")
+            return
+        Path("gipotez").mkdir(parents=True, exist_ok=True)
+        out_path = Path("gipotez") / "all_gipotez.txt"
+        with out_path.open("a", encoding="utf-8") as f:
+            for block in msgs[:3]:
+                clean = re.sub(r"<[^>]+>", "", block)
+                f.write(clean.rstrip() + "\n\n")
+        await cq.message.answer("Согласовано. Сохранила гипотезы и сформирую повестку к встрече.")
 
     async def on_corrections_message(self, message: Message, state: FSMContext) -> None:
         """Получает замечания по гипотезам и пересобирает их с учётом комментариев."""

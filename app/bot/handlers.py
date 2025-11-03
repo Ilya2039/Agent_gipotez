@@ -19,6 +19,7 @@ def register_handlers(app) -> None:
     app.dp.callback_query.register(app.on_alt_more, F.data == "alt:more")
     app.dp.callback_query.register(app.on_actions_correct, F.data == "actions:correct")
     app.dp.callback_query.register(app.on_actions_more, F.data == "actions:more")
+    app.dp.callback_query.register(app.on_actions_agree, F.data == "actions:agree")
     app.dp.callback_query.register(app.on_theme_skip, F.data == "theme:skip")
     app.dp.message.register(app.on_dynamic_answer, Flow.waiting_dynamic_answer)
     app.dp.message.register(app.on_theme_answer, Flow.waiting_theme)

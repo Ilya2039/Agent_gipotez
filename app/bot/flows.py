@@ -17,7 +17,7 @@ from app.prompts.core import (
     build_refine_hypotheses_prompt,
 )
 from app.bot.ui import build_alt_keyboard, format_question, build_actions_keyboard
-from app.bot.texts import ACTIONS_PROMPT, BTN_CORRECT, BTN_MORE, HELPFUL_TO_KNOW_TITLE
+from app.bot.texts import ACTIONS_PROMPT, BTN_CORRECT, BTN_MORE, BTN_AGREE, HELPFUL_TO_KNOW_TITLE
 from app.bot.states import Flow
 from app.services.examples import generate_short_example
 from app.bot.states import Flow
@@ -109,6 +109,8 @@ async def finalize_dynamic_hypothesis(app, message, state: FSMContext) -> None:
             hypos.append(alt_obj)
             avoid_titles = f"{avoid_titles}; {title}" if avoid_titles else title
     items = hypos[:3]
+    # подготавливаем хранилище последних сообщений гипотез (для сохранения по кнопке согласия)
+    app.last_hypotheses_messages[chat_id] = []
     for idx, item in enumerate(items, start=1):
         title = (item.get("hypothesis") or "").strip()
         reason = (item.get("reason") or "").strip()
@@ -124,6 +126,7 @@ async def finalize_dynamic_hypothesis(app, message, state: FSMContext) -> None:
         reason_txt = f"Причина: {reason}" if reason else ""
         block = (f"<b>Гипотеза: {title}</b>\n\n" + reason_txt + ("\n\n" + bullets))
         await message.answer(block)
+        app.last_hypotheses_messages[chat_id].append(block)
 
     # Блок "Будет полезно узнать у клиента" + примеры ответов
     unknown_qs = list(app.meta.get(chat_id, {}).get("unknown_qs", [])) if app.meta.get(chat_id) else []
@@ -140,7 +143,7 @@ async def finalize_dynamic_hypothesis(app, message, state: FSMContext) -> None:
         await message.answer("\n\n".join(lines))
 
     # Сообщение с действиями
-    await message.answer(ACTIONS_PROMPT, reply_markup=build_actions_keyboard(BTN_CORRECT, BTN_MORE))
+    await message.answer(ACTIONS_PROMPT, reply_markup=build_actions_keyboard(BTN_CORRECT, BTN_MORE, BTN_AGREE))
     if hypos:
         first_title = (hypos[0].get("hypothesis") or "").strip()
         app._log(chat_id, f"FINAL HYPOTHESES: {[ (h.get('hypothesis') or '').strip() for h in hypos[:3] ]}")
@@ -178,6 +181,7 @@ async def refine_hypotheses(app, message, state: FSMContext, correction_text: st
         hypos = last_hypos
     
     # Отправляем 3 гипотезы отдельными сообщениями
+    app.last_hypotheses_messages[chat_id] = []
     for idx, item in enumerate(hypos[:3], start=1):
         title = (item.get("hypothesis") or "").strip()
         reason = (item.get("reason") or "").strip()
@@ -193,6 +197,7 @@ async def refine_hypotheses(app, message, state: FSMContext, correction_text: st
         reason_txt = f"Причина: {reason}" if reason else ""
         block = (f"<b>Гипотеза: {title}</b>\n\n" + reason_txt + ("\n\n" + bullets))
         await message.answer(block)
+        app.last_hypotheses_messages[chat_id].append(block)
     
     # Блок "Будет полезно узнать у клиента" + примеры ответов
     unknown_qs = list(app.meta.get(chat_id, {}).get("unknown_qs", [])) if app.meta.get(chat_id) else []
@@ -209,7 +214,7 @@ async def refine_hypotheses(app, message, state: FSMContext, correction_text: st
         await message.answer("\n\n".join(lines))
     
     # Сообщение с действиями
-    await message.answer(ACTIONS_PROMPT, reply_markup=build_actions_keyboard(BTN_CORRECT, BTN_MORE))
+    await message.answer(ACTIONS_PROMPT, reply_markup=build_actions_keyboard(BTN_CORRECT, BTN_MORE, BTN_AGREE))
     
     # Обновляем last_hypotheses и last_result
     app.last_hypotheses[chat_id] = hypos[:3]

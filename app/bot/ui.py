@@ -27,11 +27,14 @@ def format_question(idx: int, qtext: str, example_prefix: str, example: str | No
     return f"Вопрос {idx}:\n{qtext}{tail}"
 
 
-def build_actions_keyboard(btn_correct: str, btn_more: str) -> InlineKeyboardMarkup:
-    """Клавиатура с двумя кнопками: корректировка и новые гипотезы (в один ряд)."""
-    row = [
+def build_actions_keyboard(btn_correct: str, btn_more: str, btn_agree: str | None = None) -> InlineKeyboardMarkup:
+    """Клавиатура действий: ряд из 2-х (корректировка, ещё) и отдельной строкой — согласие."""
+    top_row = [
         InlineKeyboardButton(text=btn_correct, callback_data="actions:correct"),
         InlineKeyboardButton(text=btn_more, callback_data="actions:more"),
     ]
-    return InlineKeyboardMarkup(inline_keyboard=[row])
+    rows = [top_row]
+    if btn_agree:
+        rows.append([InlineKeyboardButton(text=btn_agree, callback_data="actions:agree")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
