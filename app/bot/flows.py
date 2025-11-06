@@ -111,10 +111,12 @@ async def finalize_dynamic_hypothesis(app, message, state: FSMContext) -> None:
     items = hypos[:3]
     # подготавливаем хранилище последних сообщений гипотез (для сохранения по кнопке согласия)
     app.last_hypotheses_messages[chat_id] = []
+    # Формируем итоговую повестку с заголовком и нумерацией
+    header = '<b>Гипотезы для фокусного обсуждения бизнеса клиента:</b>'
+    blocks = []
     for idx, item in enumerate(items, start=1):
         title = (item.get("hypothesis") or "").strip()
         reason = (item.get("reason") or "").strip()
-        # для каждой гипотезы 2-3 вопроса (запрашиваем 3, используем до 3)
         q_prompt = build_generate_meeting_questions_prompt(title, qa_json, dialog_blob, count=3)
         q_raw = await app._invoke_llm(q_prompt, system=app._system_strict_json)
         try:
@@ -124,9 +126,10 @@ async def finalize_dynamic_hypothesis(app, message, state: FSMContext) -> None:
         qs_list = [str(q).strip() for q in (q_arr[:3] if isinstance(q_arr, list) else [])]
         bullets = "\n".join([f"- {q}" for q in qs_list]) if qs_list else "- —"
         reason_txt = f"Причина: {reason}" if reason else ""
-        block = (f"<b>Гипотеза: {title}</b>\n\n" + reason_txt + ("\n\n" + bullets))
-        await message.answer(block)
+        block = f"{idx}. {title}\n{reason_txt}\n{bullets}"
+        blocks.append(block)
         app.last_hypotheses_messages[chat_id].append(block)
+    await message.answer("Гипотезы для фокусного обсуждения бизнеса клиента:\n\n" + "\n\n".join(blocks))
 
     # Блок "Будет полезно узнать у клиента" + примеры ответов
     unknown_qs = list(app.meta.get(chat_id, {}).get("unknown_qs", [])) if app.meta.get(chat_id) else []
@@ -195,7 +198,7 @@ async def refine_hypotheses(app, message, state: FSMContext, correction_text: st
         qs_list = [str(q).strip() for q in (q_arr[:3] if isinstance(q_arr, list) else [])]
         bullets = "\n".join([f"- {q}" for q in qs_list]) if qs_list else "- —"
         reason_txt = f"Причина: {reason}" if reason else ""
-        block = (f"<b>Гипотеза: {title}</b>\n\n" + reason_txt + ("\n\n" + bullets))
+        block = f"{idx}. {title}\n{reason_txt}\n{bullets}"
         await message.answer(block)
         app.last_hypotheses_messages[chat_id].append(block)
     

@@ -232,7 +232,7 @@ class BotApp:
         for h in last_hypos:
             title = str(h.get("hypothesis") or "").strip()
             if title:
-                self.avoid_hypotheses.setdefault(chat_id, []).append(title)
+                self.avoid_hypотезы.setdefault(chat_id, []).append(title)
         self.dynamic_qa[chat_id] = []
         self.dynamic_idx[chat_id] = 0
         try:
@@ -308,12 +308,17 @@ class BotApp:
         await preface_step3_handler(self, message, state)
 
     async def on_actions_more(self, cq: CallbackQuery, state: FSMContext) -> None:
-        """Кнопка 'Получить еще гипотезы' — начинаем новый цикл вопросов."""
+        """Кнопка 'Получить еще гипотезы' — спрашиваем про интересующую тему."""
+        from app.bot.texts import THEME_FOR_CORRECTIONS, BTN_SKIP_THEME
         try:
             await cq.answer()
         except Exception:
             pass
-        await self.on_alt_more(cq, state)
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=BTN_SKIP_THEME, callback_data="theme:skip_more")]
+        ])
+        await cq.message.answer(THEME_FOR_CORRECTIONS, reply_markup=kb)
+        await state.set_state(Flow.waiting_theme_for_corrections)
 
     async def on_actions_correct(self, cq: CallbackQuery, state: FSMContext) -> None:
         """Кнопка 'Скоректировать текущие' — спрашиваем замечания пользователя."""
@@ -327,7 +332,6 @@ class BotApp:
 
     async def on_actions_agree(self, cq: CallbackQuery, state: FSMContext) -> None:
         """Сохраняет текущие 3 гипотезы (последние показанные сообщения) в txt файл и подтверждает."""
-        import re
         from pathlib import Path
         chat_id = cq.message.chat.id
         try:
@@ -345,20 +349,110 @@ class BotApp:
             for block in msgs[:3]:
                 clean = re.sub(r"<[^>]+>", "", block)
                 f.write(clean.rstrip() + "\n\n")
-        await cq.message.answer("Согласовано. Сохранила гипотезы и сформирую повестку к встрече.")
+        # Сохранили гипотезы — теперь спрашиваем, новый ли это клиент
+        from app.bot.texts import NEW_CLIENT_PROMPT, BTN_YES, BTN_NO
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=BTN_YES, callback_data="newclient:yes"), InlineKeyboardButton(text=BTN_NO, callback_data="newclient:no")]
+        ])
+        await cq.message.answer("Согласовано. Сохранила гипотезы.")
+        await cq.message.answer(NEW_CLIENT_PROMPT, reply_markup=kb)
+
+    async def on_newclient_yes(self, cq: CallbackQuery, state: FSMContext) -> None:
+        """Обработчик кнопки 'Да' для вопроса 'Новый клиент?'. Отправляет 'Текст 1' + гипотезы."""
+        chat_id = cq.message.chat.id
+        try:
+            await cq.answer()
+        except Exception:
+            pass
+        from app.bot.texts import NEW_CLIENT_YES_TEXT
+        msgs = self.last_hypotheses_messages.get(chat_id) or []
+        hypos = []
+        for block in msgs[:3]:
+            hypos.append(re.sub(r"<[^>]+>", "", block).rstrip())
+        hypos_text = "\n\n".join(hypos) if hypos else ""
+        header = "Гипотезы для фокусного обсуждения бизнеса клиента:"
+        if hypos_text:
+            await cq.message.answer(f"{NEW_CLIENT_YES_TEXT}\n\n{header}\n\n{hypos_text}")
+        else:
+            await cq.message.answer(NEW_CLIENT_YES_TEXT)
+
+    async def on_newclient_no(self, cq: CallbackQuery, state: FSMContext) -> None:
+        """Обработчик кнопки 'Нет' для вопроса 'Новый клиент?'. Отправляет 'Текст 2' + гипотезы."""
+        chat_id = cq.message.chat.id
+        try:
+            await cq.answer()
+        except Exception:
+            pass
+        from app.bot.texts import NEW_CLIENT_NO_TEXT
+        msgs = self.last_hypotheses_messages.get(chat_id) or []
+        hypos = []
+        for block in msgs[:3]:
+            hypos.append(re.sub(r"<[^>]+>", "", block).rstrip())
+        hypos_text = "\n\n".join(hypos) if hypos else ""
+        header = "Гипотезы для фокусного обсуждения бизнеса клиента:"
+        if hypos_text:
+            await cq.message.answer(f"{NEW_CLIENT_NO_TEXT}\n\n{header}\n\n{hypos_text}")
+        else:
+            await cq.message.answer(NEW_CLIENT_NO_TEXT)
 
     async def on_corrections_message(self, message: Message, state: FSMContext) -> None:
-        """Получает замечания по гипотезам и пересобирает их с учётом комментариев."""
+        """Получает замечания по гипотезам или тему для новых гипотез."""
         chat_id = message.chat.id
-        # Добавляем исправления в историю для контекста
-        qa = self.dynamic_qa.get(chat_id) or []
-        qa.append({"question": "Корректировки по гипотезам", "answer": message.text or ""})
-        self.dynamic_qa[chat_id] = qa
-        from app.bot.texts import CORRECTIONS_DONE
-        from app.bot.flows import refine_hypotheses
-        await message.answer(CORRECTIONS_DONE)
-        # Пересобираем гипотезы с учётом замечаний
-        await refine_hypotheses(self, message, state, message.text or "")
+        current = await state.get_state()
+        
+        if current == Flow.waiting_theme_for_corrections:
+            # Пользователь ввёл тему для новых гипотез
+            theme = message.text or ""
+            # Сохраняем тему и инициализируем состояние как в _start_discovery
+            self.dynamic_qa[chat_id] = []
+            self.dynamic_idx[chat_id] = 0
+            self.dynamic_theme[chat_id] = theme
+            # Добавляем последние показанные гипотезы в avoid
+            last_hypos = self.last_hypotheses.get(chat_id, [])
+            for h in last_hypos:
+                title = str(h.get("hypothesis") or "").strip()
+                if title:
+                    self.avoid_hypотезы.setdefault(chat_id, []).append(title)
+            # Инициализируем meta для unknown_qs если нужно
+            if chat_id not in self.meta:
+                self.meta[chat_id] = {"unknown_qs": []}
+            # Устанавливаем состояние для ответов на вопросы
+            await state.set_state(Flow.waiting_dynamic_answer)
+            # Запускаем первый вопрос
+            from app.bot.texts import THEME_START_MSG
+            await message.answer(THEME_START_MSG)
+            # Запускаем вопрос через ask_next_discovery
+            await ask_next_discovery(self, message, state)
+        else:
+            # Обычный режим корректировок
+            # Добавляем исправления в историю для контекста
+            qa = self.dynamic_qa.get(chat_id) or []
+            qa.append({"question": "Корректировки по гипотезам", "answer": message.text or ""})
+            self.dynamic_qa[chat_id] = qa
+            from app.bot.texts import CORRECTIONS_DONE
+            from app.bot.flows import refine_hypotheses
+            await message.answer(CORRECTIONS_DONE)
+            # Пересобираем гипотезы с учётом замечаний
+            await refine_hypotheses(self, message, state, message.text or "")
+            
+    async def on_theme_skip_more(self, cq: CallbackQuery, state: FSMContext) -> None:
+        """Кнопка 'Пропустить выбор' темы при запросе новых гипотез."""
+        try:
+            await cq.answer()
+        except Exception:
+            pass
+        # Запускаем обычную генерацию гипотез без учета темы
+        await self.on_alt_more(cq, state)
+
+    async def on_theme_skip_corrections(self, cq: CallbackQuery, state: FSMContext) -> None:
+        """Кнопка 'Пропустить выбор' темы при корректировках."""
+        try:
+            await cq.answer()
+        except Exception:
+            pass
+        from app.bot.texts import ASK_CORRECTIONS
+        await cq.message.answer(ASK_CORRECTIONS)
+        await state.set_state(Flow.waiting_corrections)
 
 
 async def run_bot() -> None:
