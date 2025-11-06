@@ -370,11 +370,18 @@ class BotApp:
         for block in msgs[:3]:
             hypos.append(re.sub(r"<[^>]+>", "", block).rstrip())
         hypos_text = "\n\n".join(hypos) if hypos else ""
-        header = "Гипотезы для фокусного обсуждения бизнеса клиента:"
+        header = "*Гипотезы для фокусного обсуждения бизнеса клиента:*"
         if hypos_text:
-            await cq.message.answer(f"{NEW_CLIENT_YES_TEXT}\n\n{header}\n\n{hypos_text}")
+            await cq.message.answer(
+                f"{NEW_CLIENT_YES_TEXT}\n\n{header}\n\n{hypos_text}",
+                parse_mode='Markdown'
+            )
         else:
-            await cq.message.answer(NEW_CLIENT_YES_TEXT)
+            await cq.message.answer(
+                NEW_CLIENT_YES_TEXT,
+                parse_mode='Markdown'
+            )
+
 
     async def on_newclient_no(self, cq: CallbackQuery, state: FSMContext) -> None:
         """Обработчик кнопки 'Нет' для вопроса 'Новый клиент?'. Отправляет 'Текст 2' + гипотезы."""
@@ -389,11 +396,13 @@ class BotApp:
         for block in msgs[:3]:
             hypos.append(re.sub(r"<[^>]+>", "", block).rstrip())
         hypos_text = "\n\n".join(hypos) if hypos else ""
-        header = "Гипотезы для фокусного обсуждения бизнеса клиента:"
+        header = "*Гипотезы для фокусного обсуждения бизнеса клиента:*"
         if hypos_text:
-            await cq.message.answer(f"{NEW_CLIENT_NO_TEXT}\n\n{header}\n\n{hypos_text}")
+            await cq.message.answer(f"{NEW_CLIENT_NO_TEXT}\n\n{header}\n\n{hypos_text}"),
+            parse_mode='Markdown'
         else:
-            await cq.message.answer(NEW_CLIENT_NO_TEXT)
+            await cq.message.answer(NEW_CLIENT_NO_TEXT),
+            parse_mode='Markdown'
 
     async def on_corrections_message(self, message: Message, state: FSMContext) -> None:
         """Получает замечания по гипотезам или тему для новых гипотез."""
