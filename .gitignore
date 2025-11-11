@@ -1,0 +1,16 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# Виртуальное окружение
+.venv/
+venv/
+
+*.ipynb
+*.env
+upload/
+
+# Дополнительно можно исключить файлы IDE, если нужно
+# .idea/
+# *.vscode/
+

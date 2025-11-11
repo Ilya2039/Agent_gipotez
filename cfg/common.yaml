@@ -1,0 +1,14 @@
+paths:
+  upload_dir: upload/
+
+llm:
+  verify_ssl_certs: false
+  scope: "GIGACHAT_API_CORP"
+  model: "GigaChat-2-Max"
+  temperature: 0.8
+  timeout: 60
+  profanity_check: false
+
+max_len_docs: 8000
+max_questions: 5
+debounce_time: 5

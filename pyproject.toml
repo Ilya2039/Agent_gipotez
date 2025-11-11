@@ -1,0 +1,19 @@
+[tool.poetry]
+name = "hypothesis-bot"
+version = "0.1.0"
+description = ""
+authors = ["Denis Almukhametov"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.9"
+fastapi = "^0.121.0"
+uvicorn = "^0.38.0"
+aiogram = "^3.22.0"
+python-docx = "^1.2.0"
+langchain-community = "0.3.7"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
